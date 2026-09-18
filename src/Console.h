@@ -15,24 +15,42 @@ public:
     void begin(unsigned long baud = 115200) {
         Serial.begin(baud);
         _client.setPinProvider([]() -> uint32_t {
+            // Drain input typed ahead while blocking ops were running,
+            // otherwise a stale Enter would submit an empty PIN instantly.
+            while (Serial.available() > 0) {
+                Serial.read();
+            }
             Serial.println();
             Serial.println("=============================================");
             Serial.println("Enter the PIN shown on the clock, then Enter:");
             Serial.println("(you have 25 seconds - BLE pairing timeout)");
             Serial.println("=============================================");
-            char line[16];
-            if (!readLine(line, sizeof(line), 25000)) {
-                Serial.println("[console] PIN entry timed out");
-                return 0;
-            }
-            uint32_t passkey = 0;
-            for (const char* p = line; *p; p++) {
-                if (*p >= '0' && *p <= '9') {
-                    passkey = passkey * 10 + (*p - '0');
+
+            uint32_t start = millis();
+            while (millis() - start < 25000) {
+                char line[16];
+                if (!readLine(line, sizeof(line), 25000 - (millis() - start))) {
+                    break;
                 }
+                uint32_t passkey = 0;
+                int digits = 0;
+                for (const char* p = line; *p; p++) {
+                    if (*p >= '0' && *p <= '9') {
+                        passkey = passkey * 10 + (*p - '0');
+                        digits++;
+                    } else if (*p != ' ') {
+                        digits = 0;
+                        break;
+                    }
+                }
+                if (digits >= 1 && digits <= 6) {
+                    Serial.printf("[console] PIN entered: %06u\n", (unsigned)passkey);
+                    return passkey;
+                }
+                Serial.println("[console] empty or invalid PIN - type the digits shown on the clock");
             }
-            Serial.printf("[console] PIN entered: %06u\n", (unsigned)passkey);
-            return passkey;
+            Serial.println("[console] PIN entry timed out");
+            return 0;
         });
         printHelp();
         Serial.print("> ");
@@ -102,7 +120,8 @@ private:
     }
 
     void handlePair() {
-        if (_client.scan(5000) == 0 && !_client.hasStoredAddress()) {
+        // 10s scan: the clock advertises slowly after the pairing button
+        if (_client.scan(10000) == 0 && !_client.hasStoredAddress()) {
             Serial.println("[console] no clocks found; is the clock advertising?");
             return;
         }
