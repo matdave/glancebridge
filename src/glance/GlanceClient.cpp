@@ -293,60 +293,46 @@ bool GlanceClient::readSettings() {
     if (_dataChar == nullptr) {
         return false;
     }
-    NimBLERemoteCharacteristic* stateChar = nullptr;
-    NimBLERemoteService* svc = _client->getService(NimBLEUUID(Glance::SERVICE_UUID));
-    if (svc != nullptr) {
-        stateChar = svc->getCharacteristic(NimBLEUUID("5075fc78-1e0e-11e7-93ae-92361f002671"));
-    }
-
-    // Watch every candidate response path after the Settings-get write:
-    // notification on 8e400001, value read on 'Data', State byte changes.
-    _notifReady = false;
-    if (!sendCommand(Glance::Cmd::Settings, 0, 0, 0)) {
+    // Command 35 (UpdateAndRefresh) makes the clock publish its current data
+    // into the readable value ("prepare device for settings changes" in the
+    // official web app, as observed by the glance_clock_ha integration).
+    if (!sendCommand(Glance::Cmd::UpdateAndRefresh, 0, 0, 0)) {
         return false;
     }
-    uint8_t lastState = 0xFF;
     for (int t = 0; t < 10; t++) {
         delay(300);
-
-        if (_notifReady) {
-            _notifReady = false;
-            Settings settings;
-            if (Glance::decodeSettings(_notifBuf, _notifLen, &settings)) {
-                _settingsHex = toHex(_notifBuf, _notifLen);
-                Serial.printf("[%s] settings via notification: nightMode=%d brightness=%d 12h=%d\n",
-                              TAG, settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
-                              settings.timeFormat12 ? 1 : 0);
-                return true;
-            }
-            Serial.printf("[%s] notification was not a Settings message\n", TAG);
-        }
-
         NimBLEAttValue v = _dataChar->readValue();
-        if (v.length() > 0) {
-            _settingsHex = toHex((const uint8_t*)v.data(), v.length());
-            Serial.printf("[%s] settings via read (%u bytes): %s\n", TAG, (unsigned)v.length(),
-                          _settingsHex.c_str());
-            Settings settings;
-            if (Glance::decodeSettings((const uint8_t*)v.data(), v.length(), &settings)) {
-                Serial.printf("[%s] settings: nightMode=%d brightness=%d 12h=%d\n", TAG,
-                              settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
-                              settings.timeFormat12 ? 1 : 0);
-                return true;
-            }
-            Serial.printf("[%s] settings decode failed\n", TAG);
-            return false;
+        if (v.length() < 5) {
+            continue;
         }
-
-        if (stateChar != nullptr) {
-            NimBLEAttValue s = stateChar->readValue();
-            if (s.length() > 0 && s.data()[0] != lastState) {
-                lastState = s.data()[0];
-                Serial.printf("[%s] State byte: 0x%02x\n", TAG, lastState);
-            }
+        // The value is prefixed with "Data\0"; protobuf follows. Sometimes a
+        // raw command frame (first byte = command id) is returned instead.
+        const uint8_t* p = (const uint8_t*)v.data();
+        size_t len = v.length();
+        if (memcmp(p, "Data", 4) == 0 && p[4] == 0x00) {
+            p += 5;
+            len -= 5;
+        } else if (p[0] == Glance::Cmd::Settings) {
+            p += 1;
+            len -= 1;
         }
+        if (len == 0) {
+            continue;
+        }
+        _settingsHex = toHex(p, len);
+        Serial.printf("[%s] settings read (%u bytes): %s\n", TAG, (unsigned)len,
+                      _settingsHex.c_str());
+        Settings settings;
+        if (Glance::decodeSettings(p, len, &settings)) {
+            Serial.printf("[%s] settings: nightMode=%d brightness=%d 12h=%d\n", TAG,
+                          settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
+                          settings.timeFormat12 ? 1 : 0);
+            return true;
+        }
+        Serial.printf("[%s] settings decode failed\n", TAG);
+        return false;
     }
-    Serial.printf("[%s] settings response empty (no notification, no read data)\n", TAG);
+    Serial.printf("[%s] settings read: no data published after refresh\n", TAG);
     return false;
 }
 
