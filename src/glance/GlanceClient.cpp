@@ -8,6 +8,10 @@ static const char* NVS_NS = "glance";
 static const char* NVS_ADDR = "clockAddr";
 static const char* NVS_ADDR_TYPE = "clockAddrType";
 
+// Undocumented bidirectional channel (read+write+notify) seen in the GATT
+// dump; suspected response/push channel for commands sent to 'Data'.
+static const char* UNKNOWN_SVC_UUID = "8e400001-f315-4f60-9fb8-838830daea50";
+
 // ---------------------------------------------------------------- utilities
 
 static String toHex(const uint8_t* data, size_t len) {
@@ -254,6 +258,22 @@ bool GlanceClient::discoverDataCharacteristic() {
                           toHex((const uint8_t*)v.data(), v.length()).c_str());
         }
     }
+
+    // Subscribe to the undocumented notify channel
+    NimBLERemoteService* unkSvc = _client->getService(NimBLEUUID(UNKNOWN_SVC_UUID));
+    if (unkSvc != nullptr) {
+        NimBLERemoteCharacteristic* unkChr =
+            unkSvc->getCharacteristic(NimBLEUUID(UNKNOWN_SVC_UUID));
+        if (unkChr != nullptr && unkChr->canNotify()) {
+            bool ok =
+                unkChr->subscribe(true, [this](NimBLERemoteCharacteristic*, uint8_t* data,
+                                               size_t len, bool) { handleNotify(data, len); });
+            Serial.printf("[%s] 8e400001 subscribe %s\n", TAG, ok ? "ok" : "FAILED");
+        }
+    } else {
+        Serial.printf("[%s] 8e400001 service not found\n", TAG);
+    }
+
     readSettings();
     return true;
 }
@@ -265,37 +285,68 @@ void GlanceClient::handleNotify(uint8_t* data, size_t len) {
     memcpy(_notifBuf, data, len);
     _notifLen = len;
     _notifReady = true;
+    Serial.printf("[%s] notification (%u bytes): %s\n", TAG, (unsigned)len,
+                  toHex(data, len).c_str());
 }
 
 bool GlanceClient::readSettings() {
     if (_dataChar == nullptr) {
         return false;
     }
-    // The data characteristic is read+write without notify: write a Settings
-    // "get" (5,0,0,0) and read the response back from the same characteristic.
+    NimBLERemoteCharacteristic* stateChar = nullptr;
+    NimBLERemoteService* svc = _client->getService(NimBLEUUID(Glance::SERVICE_UUID));
+    if (svc != nullptr) {
+        stateChar = svc->getCharacteristic(NimBLEUUID("5075fc78-1e0e-11e7-93ae-92361f002671"));
+    }
+
+    // Watch every candidate response path after the Settings-get write:
+    // notification on 8e400001, value read on 'Data', State byte changes.
+    _notifReady = false;
     if (!sendCommand(Glance::Cmd::Settings, 0, 0, 0)) {
         return false;
     }
-    for (int attempt = 0; attempt < 3; attempt++) {
-        delay(150);
-        NimBLEAttValue value = _dataChar->readValue();
-        if (value.length() == 0) {
-            continue;
+    uint8_t lastState = 0xFF;
+    for (int t = 0; t < 10; t++) {
+        delay(300);
+
+        if (_notifReady) {
+            _notifReady = false;
+            Settings settings;
+            if (Glance::decodeSettings(_notifBuf, _notifLen, &settings)) {
+                _settingsHex = toHex(_notifBuf, _notifLen);
+                Serial.printf("[%s] settings via notification: nightMode=%d brightness=%d 12h=%d\n",
+                              TAG, settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
+                              settings.timeFormat12 ? 1 : 0);
+                return true;
+            }
+            Serial.printf("[%s] notification was not a Settings message\n", TAG);
         }
-        _settingsHex = toHex((const uint8_t*)value.data(), value.length());
-        Serial.printf("[%s] settings response (%u bytes): %s\n", TAG, (unsigned)value.length(),
-                      _settingsHex.c_str());
-        Settings settings;
-        if (Glance::decodeSettings((const uint8_t*)value.data(), value.length(), &settings)) {
-            Serial.printf("[%s] settings: nightMode=%d brightness=%d 12h=%d\n", TAG,
-                          settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
-                          settings.timeFormat12 ? 1 : 0);
-            return true;
+
+        NimBLEAttValue v = _dataChar->readValue();
+        if (v.length() > 0) {
+            _settingsHex = toHex((const uint8_t*)v.data(), v.length());
+            Serial.printf("[%s] settings via read (%u bytes): %s\n", TAG, (unsigned)v.length(),
+                          _settingsHex.c_str());
+            Settings settings;
+            if (Glance::decodeSettings((const uint8_t*)v.data(), v.length(), &settings)) {
+                Serial.printf("[%s] settings: nightMode=%d brightness=%d 12h=%d\n", TAG,
+                              settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
+                              settings.timeFormat12 ? 1 : 0);
+                return true;
+            }
+            Serial.printf("[%s] settings decode failed\n", TAG);
+            return false;
         }
-        Serial.printf("[%s] settings decode failed\n", TAG);
-        return false;
+
+        if (stateChar != nullptr) {
+            NimBLEAttValue s = stateChar->readValue();
+            if (s.length() > 0 && s.data()[0] != lastState) {
+                lastState = s.data()[0];
+                Serial.printf("[%s] State byte: 0x%02x\n", TAG, lastState);
+            }
+        }
     }
-    Serial.printf("[%s] settings response empty\n", TAG);
+    Serial.printf("[%s] settings response empty (no notification, no read data)\n", TAG);
     return false;
 }
 
