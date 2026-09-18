@@ -263,7 +263,9 @@ bool GlanceClient::discoverDataCharacteristic() {
         Serial.printf("[%s] data characteristic not found\n", TAG);
         return false;
     }
-    readSettings();
+    // Settings read is manual ('settings' console command): it sends
+    // command 35 first, which shows the cloud-update animation on the
+    // clock - not something wanted on every reconnect.
     return true;
 }
 

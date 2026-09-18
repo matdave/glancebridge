@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <glance/GlanceCommands.h>
 
+#include "bridge/ChronosBridge.h"
 #include "glance/GlanceClient.h"
 
 // Minimal serial command interface for hardware bring-up and testing.
@@ -10,7 +11,7 @@
 
 class Console {
 public:
-    explicit Console(GlanceClient& client) : _client(client) {}
+    Console(GlanceClient& client, ChronosBridge& bridge) : _client(client), _bridge(bridge) {}
 
     void begin(unsigned long baud = 115200) {
         Serial.begin(baud);
@@ -117,6 +118,7 @@ private:
         Serial.println("  settings           re-request the clock's settings");
         Serial.println("  time               show the ESP32's local time");
         Serial.println("  settime ...        set local time: settime YYYY-MM-DD HH:MM:SS");
+        Serial.println("  chronos on|off     start the Chronos peripheral / pause the relay");
         Serial.println("  forget             forget stored clock address");
         Serial.println("  status             connection + settings");
         Serial.println("  raw <hex>          write raw bytes to the data characteristic");
@@ -225,12 +227,20 @@ private:
             } else {
                 Serial.println("[console] usage: settime YYYY-MM-DD HH:MM:SS");
             }
+        } else if (cmd == "chronos" && arg == "on") {
+            _bridge.begin();
+            _bridge.setRelay(true);
+        } else if (cmd == "chronos" && arg == "off") {
+            // pauses the relay only; the peripheral keeps running
+            _bridge.setRelay(false);
         } else if (cmd == "forget") {
             _client.forget();
         } else if (cmd == "status") {
-            Serial.printf("[console] connected=%d stored=%s settings=%s\n",
-                          _client.isConnected() ? 1 : 0, _client.storedAddress().c_str(),
-                          _client.lastSettingsHex().c_str());
+            Serial.printf(
+                "[console] connected=%d stored=%s relay=%d phone=%d settings=%s\n",
+                _client.isConnected() ? 1 : 0, _client.storedAddress().c_str(),
+                _bridge.relayEnabled() ? 1 : 0, _bridge.phoneConnected() ? 1 : 0,
+                _client.lastSettingsHex().c_str());
         } else if (cmd == "raw") {
             handleRaw(arg.c_str());
         } else {
@@ -239,6 +249,7 @@ private:
     }
 
     GlanceClient& _client;
+    ChronosBridge& _bridge;
     char _line[128] = {0};
     size_t _idx = 0;
 };
