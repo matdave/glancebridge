@@ -5,13 +5,15 @@
 
 #include "bridge/ChronosBridge.h"
 #include "glance/GlanceClient.h"
+#include "net/NetTime.h"
 
 // Minimal serial command interface for hardware bring-up and testing.
 // Type "help" for the command list.
 
 class Console {
 public:
-    Console(GlanceClient& client, ChronosBridge& bridge) : _client(client), _bridge(bridge) {}
+    Console(GlanceClient& client, ChronosBridge& bridge, NetTime& net)
+        : _client(client), _bridge(bridge), _net(net) {}
 
     void begin(unsigned long baud = 115200) {
         Serial.begin(baud);
@@ -119,6 +121,9 @@ private:
         Serial.println("  time               show the ESP32's local time");
         Serial.println("  settime ...        set local time: settime YYYY-MM-DD HH:MM:SS");
         Serial.println("  chronos on|off     start the Chronos peripheral / pause the relay");
+        Serial.println("  wifi <ssid> <pass> connect to WiFi and sync time via NTP");
+        Serial.println("  wifioff            clear stored WiFi credentials");
+        Serial.println("  tz [posix]         show/set timezone, e.g. tz EST5EDT,M3.2.0,M11.1.0");
         Serial.println("  forget             forget stored clock address");
         Serial.println("  status             connection + settings");
         Serial.println("  raw <hex>          write raw bytes to the data characteristic");
@@ -205,7 +210,8 @@ private:
             if (getLocalTime(&t)) {
                 char buf[32];
                 strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &t);
-                Serial.printf("[console] local time: %s\n", buf);
+                Serial.printf("[console] local time: %s (ntp=%d wifi=%d)\n", buf,
+                              _net.timeValid() ? 1 : 0, _net.isConnected() ? 1 : 0);
             } else {
                 Serial.println("[console] system time not set");
             }
@@ -226,6 +232,23 @@ private:
                 Serial.printf("[console] system time set to %s\n", arg.c_str());
             } else {
                 Serial.println("[console] usage: settime YYYY-MM-DD HH:MM:SS");
+            }
+        } else if (cmd == "wifi") {
+            int sp = arg.indexOf(' ');
+            if (sp <= 0 || sp + 1 >= (int)arg.length()) {
+                Serial.println("[console] usage: wifi <ssid> <password>");
+            } else {
+                _net.setCredentials(arg.substring(0, sp), arg.substring(sp + 1));
+            }
+        } else if (cmd == "wifioff") {
+            _net.clearCredentials();
+        } else if (cmd == "tz") {
+            if (arg.length()) {
+                _net.setTimezone(arg);
+            } else {
+                Serial.printf("[console] timezone: %s\n",
+                              _net.tz().length() ? _net.tz().c_str() : "UTC0 (default)");
+                Serial.println("[console] set with e.g.: tz EST5EDT,M3.2.0,M11.1.0");
             }
         } else if (cmd == "chronos" && arg == "on") {
             _bridge.begin();
@@ -250,6 +273,7 @@ private:
 
     GlanceClient& _client;
     ChronosBridge& _bridge;
+    NetTime& _net;
     char _line[128] = {0};
     size_t _idx = 0;
 };
