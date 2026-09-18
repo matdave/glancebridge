@@ -34,9 +34,9 @@ void GlanceClient::begin() {
     NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
 
     _prefs.begin(NVS_NS, false);
-    _storedAddr = _prefs.getString(NVS_ADDR, "");
-    _storedType = _prefs.getUChar(NVS_ADDR_TYPE, 0);
-    if (hasStoredAddress()) {
+    if (_prefs.isKey(NVS_ADDR)) {
+        _storedAddr = _prefs.getString(NVS_ADDR, "");
+        _storedType = _prefs.getUChar(NVS_ADDR_TYPE, 0);
         Serial.printf("[%s] stored clock address: %s\n", TAG, _storedAddr.c_str());
     }
 
