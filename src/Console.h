@@ -112,6 +112,11 @@ private:
         Serial.println("  bonds              clear pairings stored in the clock");
         Serial.println("  refresh            UpdateAndRefresh");
         Serial.println("  night on|off       automatic night mode");
+        Serial.println("  gatt               dump the clock's GATT table");
+        Serial.println("  sub on|off         (un)subscribe to the undocumented 8e400001 channel");
+        Serial.println("  settings           re-request the clock's settings");
+        Serial.println("  time               show the ESP32's local time");
+        Serial.println("  settime ...        set local time: settime YYYY-MM-DD HH:MM:SS");
         Serial.println("  forget             forget stored clock address");
         Serial.println("  status             connection + settings");
         Serial.println("  raw <hex>          write raw bytes to the data characteristic");
@@ -185,6 +190,41 @@ private:
             _client.sendCommand(Glance::Cmd::EnableAutomaticNightMode, Glance::ScenePriority::BandSystem);
         } else if (cmd == "night" && arg == "off") {
             _client.sendCommand(Glance::Cmd::DisableAutomaticNightMode, Glance::ScenePriority::BandSystem);
+        } else if (cmd == "gatt") {
+            _client.dumpGattTable();
+        } else if (cmd == "sub" && arg == "on") {
+            _client.subscribePush(true);
+        } else if (cmd == "sub" && arg == "off") {
+            _client.subscribePush(false);
+        } else if (cmd == "settings") {
+            _client.readSettings();
+        } else if (cmd == "time") {
+            struct tm t;
+            if (getLocalTime(&t)) {
+                char buf[32];
+                strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &t);
+                Serial.printf("[console] local time: %s\n", buf);
+            } else {
+                Serial.println("[console] system time not set");
+            }
+        } else if (cmd == "settime") {
+            // usage: settime YYYY-MM-DD HH:MM:SS (local wall clock)
+            int y, mo, d, h, mi, s;
+            if (sscanf(arg.c_str(), "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &s) == 6) {
+                struct tm t = {};
+                t.tm_year = y - 1900;
+                t.tm_mon = mo - 1;
+                t.tm_mday = d;
+                t.tm_hour = h;
+                t.tm_min = mi;
+                t.tm_sec = s;
+                time_t epoch = mktime(&t);
+                struct timeval tv = {epoch, 0};
+                settimeofday(&tv, nullptr);
+                Serial.printf("[console] system time set to %s\n", arg.c_str());
+            } else {
+                Serial.println("[console] usage: settime YYYY-MM-DD HH:MM:SS");
+            }
         } else if (cmd == "forget") {
             _client.forget();
         } else if (cmd == "status") {

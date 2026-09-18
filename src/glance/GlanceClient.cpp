@@ -213,21 +213,44 @@ void GlanceClient::dumpGattTable() {
                           chr->canRead() ? " read" : "", chr->canWrite() ? " write" : "",
                           chr->canWriteNoResponse() ? " writeNR" : "",
                           chr->canNotify() ? " notify" : "", chr->canIndicate() ? " indicate" : "");
-            for (NimBLERemoteDescriptor* dsc : chr->getDescriptors()) {
-                Serial.printf("[%s]     desc %s handle=0x%04x\n", TAG,
-                              dsc->getUUID().toString().c_str(), dsc->getHandle());
+            NimBLERemoteDescriptor* d = chr->getDescriptor(NimBLEUUID((uint16_t)0x2901));
+            if (d != nullptr) {
+                NimBLEAttValue name = d->readValue();
+                Serial.printf("[%s]     name: '%s'\n", TAG, name.c_str());
+            }
+            if (chr->canRead()) {
+                NimBLEAttValue v = chr->readValue();
+                Serial.printf("[%s]     value (%u bytes): %s\n", TAG, (unsigned)v.length(),
+                              toHex((const uint8_t*)v.data(), v.length()).c_str());
             }
         }
     }
     Serial.printf("[%s] ---------------------------\n", TAG);
 }
 
+bool GlanceClient::subscribePush(bool on) {
+    NimBLERemoteService* unkSvc = _client->getService(NimBLEUUID(UNKNOWN_SVC_UUID));
+    if (unkSvc == nullptr) {
+        Serial.printf("[%s] 8e400001 service not found\n", TAG);
+        return false;
+    }
+    NimBLERemoteCharacteristic* unkChr = unkSvc->getCharacteristic(NimBLEUUID(UNKNOWN_SVC_UUID));
+    if (unkChr == nullptr || !unkChr->canNotify()) {
+        Serial.printf("[%s] 8e400001 characteristic not notifiable\n", TAG);
+        return false;
+    }
+    bool ok = on ? unkChr->subscribe(true, [this](NimBLERemoteCharacteristic*, uint8_t* data,
+                                                  size_t len, bool) { handleNotify(data, len); })
+                 : unkChr->unsubscribe();
+    Serial.printf("[%s] 8e400001 %s %s\n", TAG, on ? "subscribe" : "unsubscribe",
+                  ok ? "ok" : "FAILED");
+    return ok;
+}
+
 bool GlanceClient::discoverDataCharacteristic() {
-    // NimBLE 2.x discovers lazily; run the full discovery explicitly so the
-    // dump shows every attribute and getService() uses the complete cache.
-    if (_client->discoverAttributes()) {
-        dumpGattTable();
-    } else {
+    // NimBLE 2.x discovers lazily; run the full discovery explicitly so
+    // getService() uses the complete cache (dump on demand via 'gatt').
+    if (!_client->discoverAttributes()) {
         Serial.printf("[%s] full GATT discovery failed\n", TAG);
     }
     NimBLERemoteService* svc = _client->getService(NimBLEUUID(Glance::SERVICE_UUID));
@@ -240,40 +263,6 @@ bool GlanceClient::discoverDataCharacteristic() {
         Serial.printf("[%s] data characteristic not found\n", TAG);
         return false;
     }
-    Serial.printf("[%s] data characteristic canNotify=%d canIndicate=%d\n", TAG,
-                  _dataChar->canNotify() ? 1 : 0, _dataChar->canIndicate() ? 1 : 0);
-
-    // Identify the other Glance characteristics via their 0x2901 descriptions
-    for (NimBLERemoteCharacteristic* chr : svc->getCharacteristics()) {
-        if (chr->getUUID() == NimBLEUUID(Glance::DATA_CHAR_UUID)) {
-            continue;
-        }
-        NimBLERemoteDescriptor* d = chr->getDescriptor(NimBLEUUID((uint16_t)0x2901));
-        String name = d ? d->readValue().c_str() : "";
-        Serial.printf("[%s] char %s '%s'\n", TAG, chr->getUUID().toString().c_str(),
-                      name.c_str());
-        if (chr->canRead()) {
-            NimBLEAttValue v = chr->readValue();
-            Serial.printf("[%s]   value (%u bytes): %s\n", TAG, (unsigned)v.length(),
-                          toHex((const uint8_t*)v.data(), v.length()).c_str());
-        }
-    }
-
-    // Subscribe to the undocumented notify channel
-    NimBLERemoteService* unkSvc = _client->getService(NimBLEUUID(UNKNOWN_SVC_UUID));
-    if (unkSvc != nullptr) {
-        NimBLERemoteCharacteristic* unkChr =
-            unkSvc->getCharacteristic(NimBLEUUID(UNKNOWN_SVC_UUID));
-        if (unkChr != nullptr && unkChr->canNotify()) {
-            bool ok =
-                unkChr->subscribe(true, [this](NimBLERemoteCharacteristic*, uint8_t* data,
-                                               size_t len, bool) { handleNotify(data, len); });
-            Serial.printf("[%s] 8e400001 subscribe %s\n", TAG, ok ? "ok" : "FAILED");
-        }
-    } else {
-        Serial.printf("[%s] 8e400001 service not found\n", TAG);
-    }
-
     readSettings();
     return true;
 }
@@ -343,11 +332,14 @@ bool GlanceClient::sendCommand(const uint8_t* data, size_t len) {
         Serial.printf("[%s] not connected\n", TAG);
         return false;
     }
-    bool ok = _dataChar->writeValue(data, len, true);
-    if (!ok) {
-        Serial.printf("[%s] write failed\n", TAG);
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        if (_dataChar->writeValue(data, len, true)) {
+            return true;
+        }
+        Serial.printf("[%s] write failed (attempt %d/3)\n", TAG, attempt);
+        delay(100);
     }
-    return ok;
+    return false;
 }
 
 bool GlanceClient::sendCommand(uint8_t type, uint8_t prio, uint8_t a, uint8_t b,

@@ -48,7 +48,17 @@ public:
     // Convenience: notify with text (see GlanceMessages.h for option defaults).
     bool sendNotice(const char* text);
 
-    // Last Settings message read from the clock (hex, for debugging).
+    // Request + read the clock's current settings (needs a refresh first;
+    // this is what the official web app does). Diagnostics.
+    bool readSettings();
+
+    // Dump the clock's full GATT table (names + values) over serial.
+    void dumpGattTable();
+
+    // (Un)subscribe to the undocumented 8e400001 notify channel.
+    bool subscribePush(bool on);
+
+    // Last settings payload read from the clock (hex, for debugging).
     String lastSettingsHex() const { return _settingsHex; }
 
     void forget();   // clear stored address + our side of nothing (NVS addr only)
@@ -67,9 +77,7 @@ private:
     bool connect(const NimBLEAdvertisedDevice* device);
     bool discoverDataCharacteristic();
     bool secureAndDiscover();
-    bool readSettings();
     void handleNotify(uint8_t* data, size_t len);
-    void dumpGattTable();
 
     NimBLEClient* _client = nullptr;
     NimBLERemoteCharacteristic* _dataChar = nullptr;
