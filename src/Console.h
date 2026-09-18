@@ -34,23 +34,28 @@ public:
             return passkey;
         });
         printHelp();
+        Serial.print("> ");
     }
 
     void poll() {
         while (Serial.available() > 0) {
             char c = (char)Serial.read();
-            if (c == '\r') continue;
-            if (c == '\n') {
+            // CR, LF or CRLF all end a line (empty lines are ignored, so a
+            // CRLF pair only executes the command once).
+            if (c == '\r' || c == '\n') {
+                if (_idx == 0) continue;
                 _line[_idx] = '\0';
+                Serial.println();
                 handle(_line);
                 _idx = 0;
+                Serial.print("> ");
                 return;
             }
             if (_idx + 1 < sizeof(_line)) {
                 _line[_idx++] = c;
+                Serial.print(c);  // echo typed characters
             }
         }
-        _idleMs = 0;
     }
 
 private:
@@ -60,9 +65,9 @@ private:
         while (millis() - start < timeoutMs) {
             while (Serial.available() > 0) {
                 char c = (char)Serial.read();
-                if (c == '\r') continue;
-                if (c == '\n') {
+                if (c == '\r' || c == '\n') {  // CR, LF or CRLF all end the line
                     buf[idx] = '\0';
+                    Serial.println();
                     return true;
                 }
                 if (idx + 1 < bufLen) {
@@ -176,5 +181,4 @@ private:
     GlanceClient& _client;
     char _line[128] = {0};
     size_t _idx = 0;
-    uint32_t _idleMs = 0;
 };
