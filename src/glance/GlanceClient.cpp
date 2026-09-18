@@ -219,7 +219,13 @@ void GlanceClient::dumpGattTable() {
 }
 
 bool GlanceClient::discoverDataCharacteristic() {
-    dumpGattTable();
+    // NimBLE 2.x discovers lazily; run the full discovery explicitly so the
+    // dump shows every attribute and getService() uses the complete cache.
+    if (_client->discoverAttributes()) {
+        dumpGattTable();
+    } else {
+        Serial.printf("[%s] full GATT discovery failed\n", TAG);
+    }
     NimBLERemoteService* svc = _client->getService(NimBLEUUID(Glance::SERVICE_UUID));
     if (svc == nullptr) {
         Serial.printf("[%s] Glance service not found\n", TAG);
