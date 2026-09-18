@@ -1,0 +1,10 @@
+{
+    "name": "GlanceCore",
+    "version": "0.1.0",
+    "description": "Glance Clock BLE protocol layer: command framing and nanopb-generated protobuf messages",
+    "license": "WTFPL",
+    "keywords": "glance, clock, ble, protobuf, nanopb",
+    "dependencies": {
+        "nanopb/Nanopb": "^0.4.92"
+    }
+}

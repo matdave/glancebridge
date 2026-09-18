@@ -1,0 +1,30 @@
+# nanopb options: give static sizes to all variable-length fields so that
+# generated code needs no malloc (PB_ENABLE_MALLOC not required).
+# Field sizes chosen for Glance protocol limits (22.8cm clock, 4x48 LED rings,
+# 32x8 matrix; text is a byte array of ascii charcodes, icons are 2 bytes).
+
+TextData.text max_size:64
+
+Notice.text max_count:4
+
+Segments.segments max_count:16
+Segments.Segment.text max_count:4
+
+Timer.intervals max_count:8
+Timer.Interval.text max_count:4
+Timer.finalText max_count:4
+
+AlarmData.text max_count:4
+Alarms.alarm max_count:8
+
+CustomScene.object max_count:16
+CustomScene.Object.text max_count:4
+CustomScene.Object.FillData.segment max_count:48
+CustomScene.Object.AreaAnimationData.area max_count:24
+CustomScene.Object.CmdData.data max_size:32
+
+ForecastScene.values max_size:48
+ForecastScene.templateText max_size:64
+
+AppointmentsScene.appointmentData max_size:512
+AppointmentsScene.appointmentNames max_count:16
