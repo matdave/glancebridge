@@ -25,11 +25,19 @@ payload, written to characteristic
 - [x] **MVP**: BLE central client, PIN pairing (bonding in NVS), `Notify` command
 - [x] Serial console (`scan`, `pair`, `notify`, `stop`, `start`, `clear`, ...)
 - [x] Host-side protocol unit tests (native PlatformIO env)
-- [ ] Chronos side: relay phone notifications as clock notifications
-- [ ] Current Time Service GATT server (clock polls it on connect)
+- [x] **Current Time Service**: the clock polls it after connecting and sets
+      its hands from the ESP32 system clock
+- [x] **ChronosBridge**: pair the phone via the Chronos app; phone time syncs
+      the ESP32 (and therefore the clock hands) and phone notifications are
+      relayed to the clock
+- [x] Settings read/write (command 5) — read requires an UpdateAndRefresh
+      first, response is prefixed with `"Data\0"`
 - [ ] Weather: Chronos hourly forecast -> `ForecastScene` (24h ring display)
 - [ ] Chronos alarms -> `Alarms` protobuf
 - [ ] Incoming call -> `CallScene`
+- [ ] Undocumented `8e400001-f315-4f60-9fb8-838830daea50` service (read+write+
+      notify, subscribable via `sub on`) — purpose unknown, possibly the
+      response/push channel the official app uses
 
 ## Hardware
 
@@ -70,8 +78,13 @@ the stored address), and if needed
 | `bonds` | clear pairings stored in the clock |
 | `refresh` | UpdateAndRefresh (cloud-update animation) |
 | `night on\|off` | automatic night mode |
+| `gatt` | dump the clock's GATT table (names + values) |
+| `sub on\|off` | (un)subscribe to the undocumented 8e400001 channel |
+| `settings` | re-request the clock's settings |
+| `time` / `settime` | show / set the ESP32's local time (`settime YYYY-MM-DD HH:MM:SS`) |
+| `chronos on\|off` | start the Chronos peripheral / pause the notification relay |
 | `forget` | forget the stored clock address |
-| `status` | connection state + last Settings message |
+| `status` | connection, relay, phone and settings state |
 | `raw <hex>` | write raw bytes to the data characteristic |
 
 ## Layout
