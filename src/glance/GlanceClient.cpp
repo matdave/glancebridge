@@ -219,6 +219,17 @@ bool GlanceClient::readSettings() {
         return false;
     }
     NimBLEAttValue value = _dataChar->readValue();
+    if (value.length() == 0) {
+        // The clock serves its current settings through the 0x2901 (character
+        // user description) descriptor, not the characteristic value itself.
+        NimBLERemoteDescriptor* desc = _dataChar->getDescriptor(NimBLEUUID((uint16_t)0x2901));
+        if (desc != nullptr) {
+            value = desc->readValue();
+            Serial.printf("[%s] read 0x2901 descriptor\n", TAG);
+        } else {
+            Serial.printf("[%s] 0x2901 descriptor not found\n", TAG);
+        }
+    }
     _settingsHex = toHex((const uint8_t*)value.data(), value.length());
     Serial.printf("[%s] settings read (%u bytes): %s\n", TAG, (unsigned)value.length(),
                   _settingsHex.c_str());
