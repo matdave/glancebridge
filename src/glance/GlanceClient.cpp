@@ -334,6 +334,9 @@ bool GlanceClient::sendCommand(const uint8_t* data, size_t len) {
         Serial.printf("[%s] not connected\n", TAG);
         return false;
     }
+    // Visible start log: a write with response blocks until the clock ACKs
+    // or the host's 30s GATT timeout fires (which drops the connection).
+    Serial.printf("[%s] sending cmd 0x%02x (%u bytes)\n", TAG, data[0], (unsigned)len);
     for (int attempt = 1; attempt <= 3; attempt++) {
         if (_dataChar->writeValue(data, len, true)) {
             return true;
