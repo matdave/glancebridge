@@ -219,14 +219,17 @@ bool GlanceClient::readSettings() {
         return false;
     }
     NimBLEAttValue value = _dataChar->readValue();
+    _settingsHex = toHex((const uint8_t*)value.data(), value.length());
+    Serial.printf("[%s] settings read (%u bytes): %s\n", TAG, (unsigned)value.length(),
+                  _settingsHex.c_str());
     Settings settings;
     if (Glance::decodeSettings((const uint8_t*)value.data(), value.length(), &settings)) {
-        _settingsHex = toHex((const uint8_t*)value.data(), value.length());
-        Serial.printf("[%s] settings (%u bytes): %s\n", TAG, (unsigned)value.length(),
-                      _settingsHex.c_str());
+        Serial.printf("[%s] settings: nightMode=%d brightness=%d 12h=%d\n", TAG,
+                      settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
+                      settings.timeFormat12 ? 1 : 0);
         return true;
     }
-    Serial.printf("[%s] settings decode failed (%u bytes)\n", TAG, (unsigned)value.length());
+    Serial.printf("[%s] settings decode failed\n", TAG);
     return false;
 }
 

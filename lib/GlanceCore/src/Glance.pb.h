@@ -273,19 +273,25 @@ typedef struct _Settings_Silent {
 typedef struct _Settings { /* TODO defaults */
     bool has_dnd;
     Settings_DND dnd;
+    bool has_nightModeEnabled;
     bool nightModeEnabled;
     bool has_permanentDND;
     bool permanentDND;
     bool has_permanentMute;
     bool permanentMute;
+    bool has_dateFormat;
     Settings_DateFormat dateFormat;
     bool has_mgrSilentIntervalMin;
     int32_t mgrSilentIntervalMin;
     bool has_mgrSilentIntervalMax;
     int32_t mgrSilentIntervalMax;
+    bool has_pointsAlwaysEnabled;
     bool pointsAlwaysEnabled;
+    bool has_displayBrightness;
     int32_t displayBrightness;
+    bool has_timeModeEnable;
     bool timeModeEnable;
+    bool has_timeFormat12;
     bool timeFormat12;
     bool has_mgrUserActivityTimeout;
     int32_t mgrUserActivityTimeout;
@@ -547,7 +553,7 @@ extern "C" {
 #define Notice_init_default                      {false, Animation_Pulse, false, Sound_Radar, false, Color_Lime, 0, {TextData_init_default, TextData_init_default, TextData_init_default, TextData_init_default}}
 #define Segments_init_default                    {0, {Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default, Segments_Segment_init_default}, false, Sound_Rise}
 #define Segments_Segment_init_default            {0, 0, {TextData_init_default, TextData_init_default, TextData_init_default, TextData_init_default}}
-#define Settings_init_default                    {false, Settings_DND_init_default, true, false, false, false, false, Settings_DateFormat_DateDisabled, false, 0, false, 0, false, 0, true, false, false, 600, false, Settings_Silent_init_default}
+#define Settings_init_default                    {false, Settings_DND_init_default, false, true, false, false, false, false, false, Settings_DateFormat_DateDisabled, false, 0, false, 0, false, false, false, 0, false, true, false, false, false, 600, false, Settings_Silent_init_default}
 #define Settings_DND_init_default                {false, 0, 0}
 #define Settings_Silent_init_default             {0, 0, 0}
 #define TextData_init_default                    {false, TextData_Modificator_Repeat, {0, {0}}}
@@ -572,7 +578,7 @@ extern "C" {
 #define Notice_init_zero                         {false, _Animation_MIN, false, _Sound_MIN, false, _Color_MIN, 0, {TextData_init_zero, TextData_init_zero, TextData_init_zero, TextData_init_zero}}
 #define Segments_init_zero                       {0, {Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero, Segments_Segment_init_zero}, false, _Sound_MIN}
 #define Segments_Segment_init_zero               {0, 0, {TextData_init_zero, TextData_init_zero, TextData_init_zero, TextData_init_zero}}
-#define Settings_init_zero                       {false, Settings_DND_init_zero, 0, false, 0, false, 0, _Settings_DateFormat_MIN, false, 0, false, 0, 0, 0, 0, 0, false, 0, false, Settings_Silent_init_zero}
+#define Settings_init_zero                       {false, Settings_DND_init_zero, false, 0, false, 0, false, 0, false, _Settings_DateFormat_MIN, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, 0, false, Settings_Silent_init_zero}
 #define Settings_DND_init_zero                   {0, 0, 0}
 #define Settings_Silent_init_zero                {0, 0, 0}
 #define TextData_init_zero                       {false, _TextData_Modificator_MIN, {0, {0}}}
@@ -793,16 +799,16 @@ X(a, STATIC,   REPEATED, MESSAGE,  text,              2)
 
 #define Settings_FIELDLIST(X, a) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  dnd,               1) \
-X(a, STATIC,   REQUIRED, BOOL,     nightModeEnabled,   2) \
+X(a, STATIC,   OPTIONAL, BOOL,     nightModeEnabled,   2) \
 X(a, STATIC,   OPTIONAL, BOOL,     permanentDND,      3) \
 X(a, STATIC,   OPTIONAL, BOOL,     permanentMute,     4) \
-X(a, STATIC,   REQUIRED, UENUM,    dateFormat,        5) \
+X(a, STATIC,   OPTIONAL, UENUM,    dateFormat,        5) \
 X(a, STATIC,   OPTIONAL, INT32,    mgrSilentIntervalMin,   6) \
 X(a, STATIC,   OPTIONAL, INT32,    mgrSilentIntervalMax,   7) \
-X(a, STATIC,   REQUIRED, BOOL,     pointsAlwaysEnabled,   9) \
-X(a, STATIC,   REQUIRED, INT32,    displayBrightness,  10) \
-X(a, STATIC,   REQUIRED, BOOL,     timeModeEnable,   11) \
-X(a, STATIC,   REQUIRED, BOOL,     timeFormat12,     12) \
+X(a, STATIC,   OPTIONAL, BOOL,     pointsAlwaysEnabled,   9) \
+X(a, STATIC,   OPTIONAL, INT32,    displayBrightness,  10) \
+X(a, STATIC,   OPTIONAL, BOOL,     timeModeEnable,   11) \
+X(a, STATIC,   OPTIONAL, BOOL,     timeFormat12,     12) \
 X(a, STATIC,   OPTIONAL, INT32,    mgrUserActivityTimeout,  13) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  silent,           14)
 #define Settings_CALLBACK NULL

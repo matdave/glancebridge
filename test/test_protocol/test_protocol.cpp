@@ -51,6 +51,18 @@ void test_settings_decode() {
     TEST_ASSERT_TRUE(settings.timeFormat12);
 }
 
+void test_settings_decode_partial() {
+    // The clock's live settings may omit fields; all Settings fields are
+    // optional now, so a partial message must decode.
+    const uint8_t data[] = {0x10, 0x01, 0x50, 0x05};  // nightModeEnabled=true, brightness=5
+    Settings settings;
+    TEST_ASSERT_TRUE(Glance::decodeSettings(data, sizeof(data), &settings));
+    TEST_ASSERT_TRUE(settings.has_nightModeEnabled);
+    TEST_ASSERT_TRUE(settings.nightModeEnabled);
+    TEST_ASSERT_EQUAL_INT32(5, settings.displayBrightness);
+    TEST_ASSERT_FALSE(settings.has_timeFormat12);
+}
+
 void test_make_command_rejects_small_buffer() {
     uint8_t small[4];
     uint8_t payload[] = {0x41};

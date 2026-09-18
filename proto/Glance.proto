@@ -12,6 +12,9 @@ syntax = "proto2";
 //  5. Notice.sound default General_alert_1 -> Radar (alias for the same value, 5).
 //  6. Segments.sound default Calendar_alert -> Rise (alias for the same value, 2).
 //  7. ForecastScene.template -> templateText ('template' is a C++ keyword).
+//  8. Settings: required -> optional for all scalar fields. The clock's live
+//     settings reply may omit fields; nanopb rejects messages that are missing
+//     any 'required' field, which broke reading the settings.
 
 //TODO: required with default?
 
@@ -297,16 +300,16 @@ message Segments {
 
 message Settings { //TODO defaults
 	   optional DND dnd = 1;
-	   required bool nightModeEnabled = 2 [default = true];
+	   optional bool nightModeEnabled = 2 [default = true];
 	   optional bool permanentDND = 3 [default = false];
 	   optional bool permanentMute = 4 [default = false];
-	   required DateFormat dateFormat = 5 [default = DateDisabled];
+	   optional DateFormat dateFormat = 5 [default = DateDisabled];
 	   optional int32 mgrSilentIntervalMin = 6 [default = 0];
 	   optional int32 mgrSilentIntervalMax = 7 [default = 0];
-	   required bool pointsAlwaysEnabled = 9 [default = false];
-	   required int32 displayBrightness = 10 [default = 0];
-	   required bool timeModeEnable = 11 [default = true];
-	   required bool timeFormat12 = 12 [default = false];
+	   optional bool pointsAlwaysEnabled = 9 [default = false];
+	   optional int32 displayBrightness = 10 [default = 0];
+	   optional bool timeModeEnable = 11 [default = true];
+	   optional bool timeFormat12 = 12 [default = false];
 	   optional int32 mgrUserActivityTimeout = 13 [default = 600];
 	   optional Silent silent = 14;
 
