@@ -210,31 +210,48 @@ bool GlanceClient::discoverDataCharacteristic() {
         Serial.printf("[%s] data characteristic not found\n", TAG);
         return false;
     }
+    if (_dataChar->canNotify() &&
+        !_dataChar->subscribe(true, [this](NimBLERemoteCharacteristic*, uint8_t* data,
+                                           size_t len, bool) { handleNotify(data, len); })) {
+        Serial.printf("[%s] subscribe failed\n", TAG);
+    }
     readSettings();
     return true;
+}
+
+void GlanceClient::handleNotify(uint8_t* data, size_t len) {
+    if (len > sizeof(_notifBuf)) {
+        len = sizeof(_notifBuf);
+    }
+    memcpy(_notifBuf, data, len);
+    _notifLen = len;
+    _notifReady = true;
 }
 
 bool GlanceClient::readSettings() {
     if (_dataChar == nullptr) {
         return false;
     }
-    NimBLEAttValue value = _dataChar->readValue();
-    if (value.length() == 0) {
-        // The clock serves its current settings through the 0x2901 (character
-        // user description) descriptor, not the characteristic value itself.
-        NimBLERemoteDescriptor* desc = _dataChar->getDescriptor(NimBLEUUID((uint16_t)0x2901));
-        if (desc != nullptr) {
-            value = desc->readValue();
-            Serial.printf("[%s] read 0x2901 descriptor\n", TAG);
-        } else {
-            Serial.printf("[%s] 0x2901 descriptor not found\n", TAG);
-        }
+    // The characteristic value reads back empty and the 0x2901 descriptor is
+    // just a "Data" string. The clock answers a Settings command (5,0,0,0)
+    // with the current settings as a notification on the same characteristic.
+    _notifReady = false;
+    if (!sendCommand(Glance::Cmd::Settings, 0, 0, 0)) {
+        return false;
     }
-    _settingsHex = toHex((const uint8_t*)value.data(), value.length());
-    Serial.printf("[%s] settings read (%u bytes): %s\n", TAG, (unsigned)value.length(),
+    uint32_t start = millis();
+    while (!_notifReady && millis() - start < 2000) {
+        delay(10);
+    }
+    if (!_notifReady) {
+        Serial.printf("[%s] settings request timed out\n", TAG);
+        return false;
+    }
+    _settingsHex = toHex(_notifBuf, _notifLen);
+    Serial.printf("[%s] settings received (%u bytes): %s\n", TAG, (unsigned)_notifLen,
                   _settingsHex.c_str());
     Settings settings;
-    if (Glance::decodeSettings((const uint8_t*)value.data(), value.length(), &settings)) {
+    if (Glance::decodeSettings(_notifBuf, _notifLen, &settings)) {
         Serial.printf("[%s] settings: nightMode=%d brightness=%d 12h=%d\n", TAG,
                       settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
                       settings.timeFormat12 ? 1 : 0);

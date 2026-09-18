@@ -68,12 +68,18 @@ private:
     bool discoverDataCharacteristic();
     bool secureAndDiscover();
     bool readSettings();
+    void handleNotify(uint8_t* data, size_t len);
 
     NimBLEClient* _client = nullptr;
     NimBLERemoteCharacteristic* _dataChar = nullptr;
     bool _connected = false;
     bool _authenticated = false;
     bool _scanning = false;
+
+    // last notification from the clock's data characteristic
+    uint8_t _notifBuf[256] = {0};
+    size_t _notifLen = 0;
+    volatile bool _notifReady = false;
 
     PinProvider _pinProvider;
     std::vector<const NimBLEAdvertisedDevice*> _scanResults;
