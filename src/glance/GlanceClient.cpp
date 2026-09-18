@@ -59,8 +59,7 @@ void GlanceClient::loop() {
     Serial.printf("[%s] reconnecting to %s...\n", TAG, _storedAddr.c_str());
     NimBLEAddress addr(_storedAddr.c_str(), _storedType);
     if (_client->connect(addr)) {
-        // onConnect/onAuthenticationComplete handle the rest
-        if (!discoverDataCharacteristic()) {
+        if (!secureAndDiscover()) {
             _client->disconnect();
         }
     }
@@ -101,8 +100,6 @@ void GlanceClient::printScanResults() const {
 
 // ------------------------------------------------------------------ pairing
 
-// ------------------------------------------------------------------ pairing
-
 void GlanceClient::onPassKeyEntry(NimBLEConnInfo& connInfo) {
     Serial.printf("[%s] passkey requested (conn handle %u)\n", TAG, connInfo.getConnHandle());
     uint32_t passkey = _pinProvider ? _pinProvider() : 0;
@@ -110,27 +107,18 @@ void GlanceClient::onPassKeyEntry(NimBLEConnInfo& connInfo) {
 }
 
 void GlanceClient::onAuthenticationComplete(NimBLEConnInfo& connInfo) {
+    // Logging only: secureConnection() in the main task tracks the result.
     if (connInfo.isEncrypted()) {
-        _authenticated = true;
         Serial.printf("[%s] authentication complete, bonded=%d\n", TAG,
                       connInfo.isBonded() ? 1 : 0);
-        if (!discoverDataCharacteristic()) {
-            Serial.printf("[%s] characteristic discovery failed\n", TAG);
-            _client->disconnect();
-        }
     } else {
         Serial.printf("[%s] authentication FAILED\n", TAG);
-        _authenticated = false;
     }
 }
 
 void GlanceClient::onConnect(NimBLEClient* pClient) {
     _connected = true;
     Serial.printf("[%s] connected, MTU=%u\n", TAG, pClient->getMTU());
-    // Explicitly start SMP pairing from the central side.
-    if (!pClient->secureConnection()) {
-        Serial.printf("[%s] secureConnection() failed\n", TAG);
-    }
 }
 
 void GlanceClient::onDisconnect(NimBLEClient* pClient, int reason) {
@@ -196,12 +184,19 @@ bool GlanceClient::connect(const NimBLEAdvertisedDevice* device) {
     if (!_client->connect(device)) {
         return false;
     }
-    // onConnect() -> secureConnection() -> onPassKeyEntry/onAuthenticationComplete
-    uint32_t waitStart = millis();
-    while (!_authenticated && millis() - waitStart < 45000 && _client->isConnected()) {
-        delay(50);
+    return secureAndDiscover();
+}
+
+// Start SMP pairing / re-encryption and discover the data characteristic.
+// MUST run in the main task: calling blocking BLE functions from inside
+// NimBLE callbacks (host task) deadlocks the stack.
+bool GlanceClient::secureAndDiscover() {
+    if (!_client->secureConnection()) {
+        Serial.printf("[%s] secureConnection failed\n", TAG);
+        return false;
     }
-    return _authenticated;
+    _authenticated = true;
+    return discoverDataCharacteristic();
 }
 
 bool GlanceClient::discoverDataCharacteristic() {

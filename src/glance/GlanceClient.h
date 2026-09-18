@@ -66,6 +66,7 @@ public:
 private:
     bool connect(const NimBLEAdvertisedDevice* device);
     bool discoverDataCharacteristic();
+    bool secureAndDiscover();
     bool readSettings();
 
     NimBLEClient* _client = nullptr;

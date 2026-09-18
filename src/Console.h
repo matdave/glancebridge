@@ -18,9 +18,10 @@ public:
             Serial.println();
             Serial.println("=============================================");
             Serial.println("Enter the PIN shown on the clock, then Enter:");
+            Serial.println("(you have 25 seconds - BLE pairing timeout)");
             Serial.println("=============================================");
             char line[16];
-            if (!readLine(line, sizeof(line), 60000)) {
+            if (!readLine(line, sizeof(line), 25000)) {
                 Serial.println("[console] PIN entry timed out");
                 return 0;
             }
