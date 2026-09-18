@@ -69,6 +69,7 @@ private:
     bool secureAndDiscover();
     bool readSettings();
     void handleNotify(uint8_t* data, size_t len);
+    void dumpGattTable();
 
     NimBLEClient* _client = nullptr;
     NimBLERemoteCharacteristic* _dataChar = nullptr;

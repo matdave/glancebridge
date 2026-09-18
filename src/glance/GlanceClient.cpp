@@ -199,7 +199,27 @@ bool GlanceClient::secureAndDiscover() {
     return discoverDataCharacteristic();
 }
 
+void GlanceClient::dumpGattTable() {
+    Serial.printf("[%s] ---- remote GATT table ----\n", TAG);
+    for (NimBLERemoteService* svc : _client->getServices()) {
+        Serial.printf("[%s] svc %s\n", TAG, svc->getUUID().toString().c_str());
+        for (NimBLERemoteCharacteristic* chr : svc->getCharacteristics()) {
+            Serial.printf("[%s]   chr %s handle=0x%04x props:%s%s%s%s%s\n", TAG,
+                          chr->getUUID().toString().c_str(), chr->getHandle(),
+                          chr->canRead() ? " read" : "", chr->canWrite() ? " write" : "",
+                          chr->canWriteNoResponse() ? " writeNR" : "",
+                          chr->canNotify() ? " notify" : "", chr->canIndicate() ? " indicate" : "");
+            for (NimBLERemoteDescriptor* dsc : chr->getDescriptors()) {
+                Serial.printf("[%s]     desc %s handle=0x%04x\n", TAG,
+                              dsc->getUUID().toString().c_str(), dsc->getHandle());
+            }
+        }
+    }
+    Serial.printf("[%s] ---------------------------\n", TAG);
+}
+
 bool GlanceClient::discoverDataCharacteristic() {
+    dumpGattTable();
     NimBLERemoteService* svc = _client->getService(NimBLEUUID(Glance::SERVICE_UUID));
     if (svc == nullptr) {
         Serial.printf("[%s] Glance service not found\n", TAG);
@@ -210,10 +230,16 @@ bool GlanceClient::discoverDataCharacteristic() {
         Serial.printf("[%s] data characteristic not found\n", TAG);
         return false;
     }
-    if (_dataChar->canNotify() &&
-        !_dataChar->subscribe(true, [this](NimBLERemoteCharacteristic*, uint8_t* data,
-                                           size_t len, bool) { handleNotify(data, len); })) {
-        Serial.printf("[%s] subscribe failed\n", TAG);
+    Serial.printf("[%s] data characteristic canNotify=%d canIndicate=%d\n", TAG,
+                  _dataChar->canNotify() ? 1 : 0, _dataChar->canIndicate() ? 1 : 0);
+    if (_dataChar->canNotify()) {
+        bool subscribed =
+            _dataChar->subscribe(true, [this](NimBLERemoteCharacteristic*, uint8_t* data,
+                                              size_t len, bool) { handleNotify(data, len); });
+        Serial.printf("[%s] subscribe %s\n", TAG, subscribed ? "ok" : "FAILED");
+        if (!subscribed) {
+            Serial.printf("[%s] subscribe failed\n", TAG);
+        }
     }
     readSettings();
     return true;
