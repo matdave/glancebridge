@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <ChronosESP32.h>
 
+#include <functional>
+
 #include <glance/GlanceClient.h>
 
 // Bridges the Chronos phone app (BLE peripheral side) to the Glance clock
@@ -28,6 +30,10 @@ public:
     bool started() const { return _started; }
     bool phoneConnected() { return _started && _watch.isConnected(); }
 
+    // Set the policy hook for phone time pushes (called after the library
+    // has already applied the time to the system clock).
+    void onPhoneTime(std::function<void()> hook) { _onPhoneTime = std::move(hook); }
+
 private:
     void onNotification(const Notification& n);
 
@@ -35,4 +41,5 @@ private:
     ChronosESP32 _watch{"GlanceBridge"};
     bool _started = false;
     bool _relay = true;
+    std::function<void()> _onPhoneTime;
 };

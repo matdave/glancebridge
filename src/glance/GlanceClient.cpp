@@ -42,12 +42,37 @@ void GlanceClient::begin() {
         _storedAddr = _prefs.getString(NVS_ADDR, "");
         _storedType = _prefs.getUChar(NVS_ADDR_TYPE, 0);
         Serial.printf("[%s] stored clock address: %s\n", TAG, _storedAddr.c_str());
+        // Bond bookkeeping: if we hold a stored address but NimBLE has no
+        // bond for it (NVS was wiped, e.g. after a flash erase), re-pairing
+        // is required and the clock will show a PIN. Without this check the
+        // reconnect fails confusingly ("bonded" clock asking for a PIN).
+        NimBLEAddress stored(_storedAddr.c_str(), _storedType);
+        int bonds = NimBLEDevice::getNumBonds();
+        bool bonded = false;
+        for (int i = 0; i < bonds; i++) {
+            if (NimBLEDevice::getBondedAddress(i) == stored) {
+                bonded = true;
+                break;
+            }
+        }
+        Serial.printf("[%s] ESP32 bond for clock: %s (%d bond(s) in NVS)\n", TAG,
+                      bonded ? "present" : "MISSING - expect a PIN prompt, run "
+                      "'forget' then 'pair'", bonds);
     }
 
     _client = NimBLEDevice::createClient();
     if (_client != nullptr) {
         _client->setClientCallbacks(this, false);
-        _client->setConnectTimeout(5000);
+        // 10s: under WiFi + dual-BLE coex load, 5s occasionally timed out
+        // (BLE_HS_ETIMEOUT) even though the clock was connectable.
+        _client->setConnectTimeout(10000);
+    }
+    // Boot stagger: give the Chronos phone connection time to settle
+    // before we open a second link. Two simultaneous connection
+    // establishments have tripped a controller assert (llc.c / r_llc_start,
+    // Guru Meditation + reboot).
+    if (_storedAddr.length() > 0) {
+        _nextReconnectMs = millis() + 5000;
     }
 }
 
@@ -105,7 +130,17 @@ void GlanceClient::printScanResults() const {
 // ------------------------------------------------------------------ pairing
 
 void GlanceClient::onPassKeyEntry(NimBLEConnInfo& connInfo) {
-    Serial.printf("[%s] passkey requested (conn handle %u)\n", TAG, connInfo.getConnHandle());
+    // A bonded reconnect should NEVER re-pair (NimBLE re-encrypts with the
+    // stored LTK). A passkey request here means the clock lost our bond
+    // (DFU/factory reset). Let the user re-pair through the normal PIN flow
+    // - that re-establishes the bond on both sides - but say why it is
+    // happening (otherwise this looks like a mysterious recurring PIN).
+    if (!_pairingInProgress && hasStoredAddress()) {
+        Serial.printf("[%s] PIN requested on reconnect - the clock lost our bond "
+                      "(DFU/factory reset). Enter the PIN to re-pair.\n", TAG);
+    } else {
+        Serial.printf("[%s] passkey requested (conn handle %u)\n", TAG, connInfo.getConnHandle());
+    }
     uint32_t passkey = _pinProvider ? _pinProvider() : 0;
     NimBLEDevice::injectPassKey(connInfo, passkey);
 }
@@ -130,6 +165,7 @@ void GlanceClient::onDisconnect(NimBLEClient* pClient, int reason) {
     _authenticated = false;
     _dataChar = nullptr;
     _battChar = nullptr;
+    _sceneChar = nullptr;
     Serial.printf("[%s] disconnected, reason=0x%04x\n", TAG, reason);
 }
 
@@ -168,7 +204,10 @@ bool GlanceClient::pair() {
     }
 
     Serial.printf("[%s] connecting to %s ...\n", TAG, target->getAddress().toString().c_str());
-    if (!connect(target)) {
+    _pairingInProgress = true;
+    bool ok = connect(target);
+    _pairingInProgress = false;
+    if (!ok) {
         Serial.printf("[%s] connect failed\n", TAG);
         return false;
     }
@@ -201,7 +240,23 @@ bool GlanceClient::secureAndDiscover() {
         return false;
     }
     _authenticated = true;
-    return discoverDataCharacteristic();
+    if (!discoverDataCharacteristic()) {
+        return false;
+    }
+    // NOTE: no automatic watchface-scene install. The mode-8 CustomScene
+    // (slot 0) does not render on firmware 1.5 (shows as a dim face), and
+    // the forecast auto-hide deletes its scene after the display window,
+    // so the clock falls back to its native watchface. 'face' console
+    // command installs it manually for experiments.
+    return true;
+}
+
+bool GlanceClient::installWatchfaceScene(uint8_t slot) {
+    // [0, 0, 8, slot]: CustomScene command, prio 0, display mode 8 =
+    // "built-in watchface", slot index. Frame layout per the C# client.
+    const uint8_t frame[] = {Glance::Cmd::CustomScene, 0, 8, slot};
+    Serial.printf("[%s] installing digital watchface scene (slot %u)\n", TAG, (unsigned)slot);
+    return sendCommand(frame, sizeof(frame));
 }
 
 void GlanceClient::dumpGattTable() {
@@ -266,10 +321,24 @@ bool GlanceClient::discoverDataCharacteristic() {
     }
     // Settings read is manual ('settings' console command): a plain read of
     // the data characteristic. It never triggers the cloud-update animation.
-    // Also cache the standard battery characteristic (0x180F/0x2A19) for the
-    // 'batt' command; optional - failure here doesn't affect commands.
+    // Also cache the standard battery characteristic (0x180F/0x2A19) and
+    // subscribe to its notifications (optional - failure doesn't affect
+    // commands); the current level is read once so consumers get a value
+    // immediately.
     NimBLERemoteService* battSvc = _client->getService(NimBLEUUID((uint16_t)0x180F));
     _battChar = battSvc ? battSvc->getCharacteristic(NimBLEUUID((uint16_t)0x2A19)) : nullptr;
+    if (_battChar != nullptr && _battChar->canRead()) {
+        NimBLEAttValue v = _battChar->readValue();
+        if (v.length() >= 1) {
+            updateBattery(v.data()[0]);
+        }
+    }
+    subscribeBattery();
+    // 'Scene' characteristic (write-only, suspected scene streaming path
+    // for commands the firmware rejects on 'Data'). Cached for 'raws'.
+    NimBLERemoteCharacteristic* scene =
+        svc->getCharacteristic(NimBLEUUID("5075ffac-1e0e-11e7-93ae-92361f002671"));
+    _sceneChar = (scene != nullptr && scene->canWrite()) ? scene : nullptr;
     return true;
 }
 
@@ -365,6 +434,18 @@ bool GlanceClient::writeSettings(const Settings* s) {
 
 // ------------------------------------------------------------------ battery
 
+// Store + publish a battery percent (host task safe: no blocking calls).
+void GlanceClient::updateBattery(uint8_t pct) {
+    if (pct > 100) {
+        pct = 100;  // some firmwares report raw 0-255
+    }
+    _battPercent = pct;
+    Serial.printf("[%s] battery: %u%%\n", TAG, (unsigned)pct);
+    if (_battCallback) {
+        _battCallback(pct);
+    }
+}
+
 int GlanceClient::readBattery() {
     if (!isConnected()) {
         Serial.printf("[%s] not connected\n", TAG);
@@ -384,16 +465,44 @@ int GlanceClient::readBattery() {
         Serial.printf("[%s] battery read: empty value\n", TAG);
         return -1;
     }
-    uint8_t pct = v.data()[0];
-    if (pct > 100) {
-        pct = 100;  // some firmwares report raw 0-255
+    updateBattery(v.data()[0]);
+    return _battPercent;
+}
+
+void GlanceClient::subscribeBattery() {
+    if (_battChar == nullptr || !_battChar->canNotify()) {
+        return;
     }
-    _battPercent = pct;
-    Serial.printf("[%s] battery: %u%%\n", TAG, (unsigned)pct);
-    return pct;
+    bool ok = _battChar->subscribe(true, [this](NimBLERemoteCharacteristic*, uint8_t* data,
+                                                size_t len, bool) {
+        if (len >= 1) {
+            updateBattery(data[0]);
+        }
+    });
+    Serial.printf("[%s] battery notifications %s\n", TAG, ok ? "on" : "FAILED");
 }
 
 // ----------------------------------------------------------------- commands
+
+bool GlanceClient::sendSceneCommand(const uint8_t* data, size_t len) {
+    if (!isConnected() || _sceneChar == nullptr) {
+        Serial.printf("[%s] scene characteristic not available\n", TAG);
+        return false;
+    }
+    Serial.printf("[%s] scene write (%u bytes): %s\n", TAG, (unsigned)len,
+                  toHex(data, len).c_str());
+    // The Scene characteristic has a hard write-length limit (< 80 bytes;
+    // rc 269 = ATT invalid value length for the forecast frame). With-
+    // response first so rejections are visible; only fall back to
+    // no-response for writes that were actually ACCEPTED with-response
+    // before (i.e. don't mask a length rejection as success).
+    if (_sceneChar->writeValue(data, len, true)) {
+        Serial.printf("[%s] scene write accepted\n", TAG);
+        return true;
+    }
+    Serial.printf("[%s] scene write rejected (likely too long for this char)\n", TAG);
+    return false;
+}
 
 bool GlanceClient::sendCommand(const uint8_t* data, size_t len) {
     if (!isConnected() || _dataChar == nullptr) {
@@ -446,12 +555,24 @@ bool GlanceClient::sendNotice(const char* text) {
 
 void GlanceClient::refreshClockTime() {
     if (!isConnected()) {
+        return;  // the regular reconnect path re-polls CTS anyway
+    }
+    // Debounce: the Chronos app sends its time config twice in quick
+    // succession, and NTP can land right after a phone sync - a second
+    // nudge mid-reconnect races the in-flight disconnect (rc=7 discovery
+    // failures, "Client not disconnected, cannot connect").
+    uint32_t now = millis();
+    if (_lastNudgeMs != 0 && (int32_t)(now - _lastNudgeMs) < 3000) {
         return;
     }
+    _lastNudgeMs = now;
     Serial.printf("[%s] time changed - reconnecting clock so it re-polls the time service\n",
                   TAG);
     _client->disconnect();
-    _nextReconnectMs = 0;  // reconnect on the next loop() pass
+    // Let the GAP disconnect settle AND give the clock's SoftDevice time to
+    // be connectable again: reconnecting after 500ms occasionally failed
+    // with "Connection failed; status=574" (BLE_ERR_CONN_ESTABLISHMENT).
+    _nextReconnectMs = now + 1500;
 }
 
 // ------------------------------------------------------------------ forget

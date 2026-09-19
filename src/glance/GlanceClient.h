@@ -26,6 +26,11 @@ public:
     // Return the 6-digit passkey. (Default impl reads from Serial.)
     using PinProvider = std::function<uint32_t()>;
 
+    // Called whenever the clock's battery level is read or notified
+    // (percent 0-100). Runs on the NimBLE host task for notifications -
+    // keep it short, no blocking BLE calls.
+    using BatteryCallback = std::function<void(int)>;
+
     void begin();
     void loop();
 
@@ -46,6 +51,17 @@ public:
     bool sendCommand(uint8_t type, uint8_t prio, uint8_t a = 0, uint8_t b = 0,
                      const uint8_t* payload = nullptr, size_t payloadLen = 0);
 
+    // Write raw bytes to the Scene characteristic (5075ffac) - for testing
+    // commands the firmware rejects on the Data characteristic (0x81).
+    bool sendSceneCommand(const uint8_t* data, size_t len);
+
+    // Install the clock's own digital watchface as a carousel scene
+    // (CustomScene cmd 0, display mode 8 = built-in watchface). Gives the
+    // carousel a bright face to return to after scene pushes like the
+    // forecast ring (an empty slot renders dim).
+    bool installWatchfaceScene(uint8_t slot = 0);
+    bool watchfaceInstalled() const { return _watchfaceInstalled; }
+
     // Convenience: notify with text (see GlanceMessages.h for option defaults).
     bool sendNotice(const char* text);
 
@@ -64,10 +80,14 @@ public:
     // settings - callers must fill every field.
     bool writeSettings(const Settings* s);
 
-    // Read the clock's battery level (standard 0x180F/0x2A19). Returns
+        // Read the clock's battery level (standard 0x180F/0x2A19). Returns
     // percent 0-100, or -1 if unavailable. Cached for status.
     int readBattery();
     int lastBattery() const { return _battPercent; }
+
+    // Subscribe to the clock's battery notifications and call the callback
+    // on every value (also fires once right after subscribing).
+    void setBatteryCallback(BatteryCallback cb) { _battCallback = std::move(cb); }
 
     // Reconnect the clock so it re-polls the Current Time Service with the
     // fresh system time (call when the time source changes: first NTP sync,
@@ -77,6 +97,17 @@ public:
 
     // Dump the clock's full GATT table (names + values) over serial.
     void dumpGattTable();
+
+    // Clean disconnect (diagnostic: does the clock keep its bond when the
+    // disconnect is deliberate vs a supervision timeout?). Reconnects on
+    // the next loop() pass.
+    void disconnect() {
+        if (_client != nullptr && _client->isConnected()) {
+            Serial.printf("[GlanceClient] clean disconnect requested\n");
+            _client->disconnect();
+            _nextReconnectMs = millis() + 5000;
+        }
+    }
 
     // (Un)subscribe to the undocumented 8e400001 notify channel.
     bool subscribePush(bool on);
@@ -101,10 +132,15 @@ private:
     bool discoverDataCharacteristic();
     bool secureAndDiscover();
     void handleNotify(uint8_t* data, size_t len);
+    void updateBattery(uint8_t pct);
+    void subscribeBattery();
 
     NimBLEClient* _client = nullptr;
     NimBLERemoteCharacteristic* _dataChar = nullptr;
     NimBLERemoteCharacteristic* _battChar = nullptr;
+    NimBLERemoteCharacteristic* _sceneChar = nullptr;
+    bool _pairingInProgress = false;  // true during deliberate pair() (PIN ok)
+    bool _watchfaceInstalled = false;  // slot 0 installed this boot?
     int _battPercent = -1;
     bool _connected = false;
     bool _authenticated = false;
@@ -116,12 +152,14 @@ private:
     volatile bool _notifReady = false;
 
     PinProvider _pinProvider;
+    BatteryCallback _battCallback;
     std::vector<const NimBLEAdvertisedDevice*> _scanResults;
 
     Preferences _prefs;
     String _storedAddr;
     uint8_t _storedType = 0;
     uint32_t _nextReconnectMs = 0;
+    uint32_t _lastNudgeMs = 0;  // last refreshClockTime() (debounce)
     String _settingsHex;
     Settings _lastSettings = Settings_init_default;
 };

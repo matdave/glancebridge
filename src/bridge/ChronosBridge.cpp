@@ -8,8 +8,23 @@ void ChronosBridge::begin() {
     }
     s_instance = this;
 
+    // Forward the clock's battery level to the Chronos app: on every
+    // read/notification from the clock, and once when the phone connects.
+    // setBattery() only flags a change; the frame goes out from _watch.loop()
+    // on the main task.
+    _glance.setBatteryCallback([this](int pct) {
+        if (pct >= 0) {
+            _watch.setBattery((uint8_t)pct);
+        }
+    });
+
     _watch.setConnectionCallback([](bool state) {
         Serial.printf("[bridge] Chronos app %s\n", state ? "connected" : "disconnected");
+        // Push the clock's battery as soon as the phone connects (library
+        // callbacks are plain function pointers; use the instance singleton).
+        if (state && s_instance != nullptr && s_instance->_glance.lastBattery() >= 0) {
+            s_instance->_watch.setBattery((uint8_t)s_instance->_glance.lastBattery());
+        }
     });
 
     _watch.setNotificationCallback([](Notification n) {
@@ -20,15 +35,17 @@ void ChronosBridge::begin() {
 
     _watch.setConfigurationCallback([](Config cfg, uint32_t a, uint32_t) {
         if (cfg == CF_TIME && a == 1) {
-            // ChronosESP32 already applied the phone time via settimeofday
-            // (it inherits ESP32Time) before this callback fires.
+            // ChronosESP32 has already applied the phone time via
+            // settimeofday (it inherits ESP32Time) before this fires.
             struct tm t;
             if (getLocalTime(&t)) {
                 char buf[32];
                 strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &t);
                 Serial.printf("[bridge] phone time sync: %s\n", buf);
             }
-            s_instance->_glance.refreshClockTime();
+            if (s_instance->_onPhoneTime) {
+                s_instance->_onPhoneTime();  // policy: accept or roll back
+            }
         }
     });
 
