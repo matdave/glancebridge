@@ -9,32 +9,67 @@
 **Working, validated on real hardware (user's Adafruit Feather ESP32 V2,
 classic ESP32, clock = `GlanceClock_3B e3:75:8d:6f:22:c8`, bonded):**
 - BLE central client: scan → PIN pairing → bonded reconnect (no PIN on reboot)
-- `notify <text>` — protobuf Notice displayed on the clock (MVP goal, works)
-- Console commands all functional; see README.md table
+- `notify <text>` — protobuf Notice displayed on the clock
+- Console commands all functional (see README/help); line editing works
+- Settings: read-modify-write + read-after-write echo (validated)
+- `batt` (0x180F), `calib`/`calok` (43/44), `stop`/`start` (30/31) — validated
+- WiFi + NTP (`wifi`, `tz` → NetTime) — validated incl. runtime re-connect
+- CTS push nudge on time change (NTP first sync / settime / phone sync →
+  reconnect → clock re-polls) — built; hands-follow-time confirmed working
+- ChronosBridge: phone time sync + notification relay — built, starts at
+  boot; status shows phone=0 until the Chronos app test is actually run
 
 **Built, committed, but NOT yet hardware-validated:**
 - WiFi + NTP (`wifi <ssid> <pass>`, `tz <posix>` → NetTime) → time syncs
 - Current Time Service (clock polls it after connecting → hands follow ESP32 time)
+- **CTS push nudge (built, untested)**: when system time first becomes valid
+  (NTP) — and on `settime` and phone time sync — the clock is disconnected
+  and immediately reconnected (`GlanceClient::refreshClockTime()`), forcing
+  it to re-poll CTS right away instead of waiting for its own schedule.
+  Chronos note: ChronosESP32 inherits ESP32Time and applies the phone time
+  via settimeofday BEFORE our CF_TIME callback fires.
 - ChronosBridge: phone via Chronos app → time sync (CF_TIME → settimeofday →
   CTS) and notification relay (app: title → Notice). Starts at boot.
 - `settime YYYY-MM-DD HH:MM:SS` manual time setting
+- WiFi + NTP (`wifi <ssid> <pass>`, `tz <posix>` → NetTime) → time syncs
+  **(VALIDATED 2026-09-19: boot connect + runtime `wifioff`→`wifi` both work;
+  the runtime failure was WiFi/BLE coex — fixed with `WiFi.setSleep(false)`
+  + clean `disconnect()` + 100ms before `begin()`; heap ~105KB is fine)**
+- `batt` — clock battery via standard 0x180F/0x2A19 (**VALIDATED: 100%**;
+  also cached for `status`)
+- Console now handles terminal line-editing keys (BS/DEL erase, ANSI ESC
+  sequences swallowed — arrow/history keys used to leak `1b ... 08` bytes
+  into the line, making valid commands report "unknown"; raw-bytes debug
+  print on unknown commands left in for now)
+- **Console cleanup 2026-09-19 (hardware-VALIDATED — "everything seems to be
+  working")**: removed `refresh` (cmd 35 no-op on cloud-less clocks).
+  `stop`/`start` now single-byte 30/31 (the 4-byte frames were likely
+  0x81-rejected like 35). `night on|off` is now a settings WRITE (40/41
+  command frames are from the cloud era) using a read-modify-write base;
+  `cfg` also now bases on last decoded settings
+  (`GlanceClient::lastSettings()`, populated by successful `settings`
+  reads) with `completeSettings()` setting every has_* flag and preserving
+  dnd/silent schedules when known. NEW: `calib` (single-byte 43, starts
+  hands calibration) + `calok` (single-byte 44, confirm) — both validated.
+  Single-byte commands 10/30/31/35/43/44/60/61 are the confirmed pattern.
 
-**Open question (active investigation):**
-- `settings` read: the write of command 35 (UpdateAndRefresh, frame
-  `23 20 00 00` or `23 00 00 00`) is **rejected by the clock's ATT server
-  almost instantly** while `notify` (command 2) writes to the SAME
-  characteristic succeed. NOT a NimBLE stall (connection stays up).
-- NimBLE error logging was just enabled (`-DCONFIG_NIMBLE_CPP_LOG_LEVEL=1`),
-  so the next `settings` attempt prints `writeValue failed, rc: N <desc>`.
-  **Get that rc from the user** — it identifies why (2=request not
-  supported, 5=insufficient auth, etc.).
-- Untested hypothesis: HA integration (PorlyBe/glance_clock_ha) sends
-  command 35 as a **single byte** `bytes([35])`. User can test without
-  reflash via console: `raw 23` (single byte) vs `raw 23000000` (our frame).
+**Settings: SOLVED and hardware-validated 2026-09-19:**
+- **Write path works**: `cfg 200` / `cfg 128` → `[5,0,0,0] + Settings proto`
+  (24 bytes) → accepted, clock applies values (brightness 200↔128 verified
+  via read-back).
+- **Publish trigger found**: after processing a settings write, the clock
+  publishes the settings into the data characteristic's readable value.
+  `settings` then reads + decodes them (e.g. `10 01 18 00 20 00 28 00 48 00
+  50 C8 01 58 01 60 00 68 D8 04` = night=1 dnd=0 mute=0 date=0 points=0
+  bright=200 timeMode=1 12h=0 activity=600). A plain read is otherwise
+  usually empty — read-after-write is the reliable pattern.
+- cmd 35 (UpdateAndRefresh) is useless here: rejected with vendor ATT 0x81
+  in both 4-byte and single-byte form (clock is cloud-less; cmd 35 = "pull
+  from Glance cloud"). No-response writes go out but publish nothing.
+  Leave as-is (sendCommand's no-response fallback is harmless + HA-proven).
 - Undocumented service `8e400001-f315-4f60-9fb8-838830daea50`
   (read+write+notify, CCCD subscribable via `sub on|off`): purpose unknown.
-  Suspected response/push channel. `sub on` did NOT make settings respond,
-  and did NOT break writes in the one A/B test done.
+  Suspected response/push channel. Subscribing did not affect anything.
 
 ## 2. Protocol knowledge (learned on hardware — preserve!)
 
@@ -50,10 +85,27 @@ Full GATT table dump (see `gatt` command) — Glance service
   (battery, read+notify).
 - Settings message from clock (when it publishes) is prefixed `"Data\0"`;
   per glance_clock_ha also sometimes a raw frame with first byte == 0x05.
-- The web app / HA flow sends command **35 (UpdateAndRefresh) before
-  touching settings** ("prepare device for settings changes").
-- Reading settings per HA integration: plain read of the Data char;
-  skip "Data" (4 bytes) + NUL (1 byte); elif first byte == 5, skip it.
+- Reading settings per HA integration / working C# client: plain read of the
+  Data char; strip `"Data\0"` (4 bytes text + NUL), or `[5,0,0,0]` (4 bytes),
+  or a single byte == 5; then protobuf.
+- **Settings write (VALIDATED on hardware 2026-09-19)**: `[5,0,0,0] +
+  Settings protobuf`, sent with-response, replaces ALL fields. After
+  processing, the clock echoes the settings back into the Data read value
+  (any of the three envelopes) — read-after-write is the reliable pattern.
+  Field map confirmed live: 2=nightMode, 3=permDND, 4=permMute, 5=dateFormat,
+  9=points, 10=brightness (varint, e.g. `50 C8 01` = 200), 11=timeMode,
+  12=12h, 13=activityTimeout (`68 D8 04` = 600).
+- **Single-byte commands are a real firmware pattern**: 35 (UpdateAndRefresh,
+  HA), 60/61 (brightness scene stop/start, HA), 10 (TimerStop), 30/31
+  (scene nav, direction unverified, C#). 4-byte frames for 35 are rejected
+  (ATT 0x81); send single-byte commands as one byte only.
+- HA forecast command header: `[7, 16, 24, 1]` (cmd 7, priority 16, 24
+  hours, slot 1) + ForecastScene protobuf (timestamp, max, min, maxColor,
+  minColor, values=24x Int16LE, template bytes).
+- Reference client with validated frame layouts (timers, rings/forecast,
+  scene slots, text modifiers `[icon:N]`, weather→animation/color maps):
+  frannraf/glance-clock-control `GlanceProtocol.cs` — cross-check there
+  before guessing protocol details.
 
 ## 3. Environment rebuild (VM loss recovery)
 
@@ -104,23 +156,20 @@ partition at 1.31MB; we were at 97% full). **Do not delete this file.**
 
 ## 4. Next steps when user returns
 
-1. Ask for the result of: `settings` (NimBLE rc line) and `raw 23` vs
-   `raw 23000000` — resolves the command-35 rejection mystery.
-2. Have them test (in order):
+1. Settings: DONE (write + read-after-write validated). `batt` validated.
+   WiFi regression RESOLVED (coex; see section 1). Diagnostics live in
+   NetTime (status transitions) and Console (raw line bytes on unknown).
+2. Validate (in order):
    - `wifi <ssid> <pass>` + `tz <posix>` → `[NetTime] time synced via NTP`
      → clock hands jump to real time (validates CTS end-to-end)
    - Install Chronos app (https://chronos.ke/app?id=esp32) → pair
      "GlanceBridge" → `status` shows `phone=1`, log shows
      `[bridge] phone time sync: ...` → hands re-sync to phone time
    - Trigger a phone notification → `[bridge] relayed: ...` + clock display
-3. If settings still rejected after rc is known: options are (a) treat cmd 35
-   as unavailable on this firmware and find another settings-publish trigger
-   (maybe via 8e400001 or after specific scene pushes), or (b) skip settings
-   read entirely (it is diagnostics-only; write path for settings is
-   `[5,0,0,0]+Settings protobuf` per HA integration and may still work).
-4. Phase 3 backlog: ForecastScene (24h hourly forecast from Chronos → ring
+3. Phase 3 backlog: ForecastScene (24h hourly forecast from Chronos → ring
    display), alarms (Chronos Alarm struct → Alarms protobuf), CallScene from
-   ringer callback. All protobufs already generated in lib/GlanceCore.
+   ringer callback. All protobufs already generated in lib/GlanceCore. The
+   C# GlanceProtocol.cs has validated ring/forecast frame builders to port.
 
 ## 5. Handy facts
 
