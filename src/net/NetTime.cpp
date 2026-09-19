@@ -15,6 +15,9 @@ void NetTime::begin() {
     _prefs.end();
 
     WiFi.setAutoReconnect(true);
+    // Modem sleep off: WiFi + dual-role BLE coexistence is more reliable
+    // without it (slightly higher power draw, fine for this project).
+    WiFi.setSleep(false);
     WiFi.mode(WIFI_STA);
 
     if (_ssid.length()) {
@@ -38,15 +41,14 @@ void NetTime::loop() {
     }
     _nextCheckMs = millis() + 5000;
 
-    bool connected = WiFi.isConnected();
-    if (connected != _wasConnected) {
-        _wasConnected = connected;
-        if (connected) {
-            Serial.printf("[%s] WiFi connected, IP: %s\n", TAG,
-                          WiFi.localIP().toString().c_str());
-        } else {
-            Serial.printf("[%s] WiFi disconnected\n", TAG);
-        }
+    wl_status_t st = WiFi.status();
+    if (st != _lastStatus) {
+        _lastStatus = st;
+        // Numeric code included: WL_IDLE_STATUS=0, WL_NO_SSID_AVAIL=1,
+        // WL_SCAN_COMPLETED=2, WL_CONNECTED=3, WL_CONNECT_FAILED=4,
+        // WL_CONNECTION_LOST=5, WL_DISCONNECTED=6.
+        Serial.printf("[%s] WiFi status -> %d (%s), IP: %s\n", TAG, (int)st,
+                      statusName(st), WiFi.localIP().toString().c_str());
     }
 
     if (_sntpStarted && !_timeValid) {
@@ -60,6 +62,18 @@ void NetTime::loop() {
     }
 }
 
+const char* NetTime::statusName(wl_status_t st) const {
+    switch (st) {
+        case WL_IDLE_STATUS: return "idle";
+        case WL_NO_SSID_AVAIL: return "no ssid";
+        case WL_SCAN_COMPLETED: return "scan done";
+        case WL_CONNECTED: return "connected";
+        case WL_CONNECT_FAILED: return "connect failed";
+        case WL_CONNECTION_LOST: return "lost";
+        default: return "disconnected";
+    }
+}
+
 bool NetTime::setCredentials(const String& ssid, const String& pass) {
     _prefs.begin(NVS_NS, false);
     _prefs.putString("ssid", ssid);
@@ -67,7 +81,20 @@ bool NetTime::setCredentials(const String& ssid, const String& pass) {
     _prefs.end();
     _ssid = ssid;
     _pass = pass;
+    if (WiFi.status() == WL_CONNECTED && WiFi.SSID() == ssid) {
+        Serial.printf("[%s] already connected to '%s'\n", TAG, ssid.c_str());
+        if (!_sntpStarted) {
+            applyTz();
+        }
+        return true;
+    }
+    // Abort any in-flight attempt cleanly before restarting: begin() right
+    // after a disconnect()/failed attempt returned WL_CONNECT_FAILED (4)
+    // once, while the same credentials connect fine at boot.
+    WiFi.disconnect(false, false);
+    WiFi.setSleep(false);
     WiFi.mode(WIFI_STA);
+    delay(100);
     WiFi.begin(ssid.c_str(), pass.c_str());
     if (!_sntpStarted) {
         applyTz();

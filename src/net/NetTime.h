@@ -33,6 +33,7 @@ public:
 
 private:
     void applyTz();
+    const char* statusName(wl_status_t st) const;
 
     Preferences _prefs;
     String _ssid;
@@ -40,6 +41,6 @@ private:
     String _tz;
     bool _sntpStarted = false;
     bool _timeValid = false;
-    bool _wasConnected = false;
+    wl_status_t _lastStatus = WL_DISCONNECTED;
     uint32_t _nextCheckMs = 0;
 };
