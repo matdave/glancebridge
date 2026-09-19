@@ -1,5 +1,7 @@
 #include <net/NetTime.h>
 
+#include <esp_sntp.h>
+
 static const char* TAG = "NetTime";
 static const char* NVS_NS = "nettime";
 
@@ -58,8 +60,23 @@ void NetTime::loop() {
             char buf[32];
             strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &t);
             Serial.printf("[%s] time synced via NTP: %s\n", TAG, buf);
+            _lastGoodEpoch = time(nullptr);
         }
+    } else if (_timeValid) {
+        // Keep a fresh snapshot so a bad external time source (phone app)
+        // can be rolled back instantly.
+        _lastGoodEpoch = time(nullptr);
     }
+}
+
+bool NetTime::restoreTime() {
+    if (_lastGoodEpoch < 100000000LL) {  // pre-1973: nothing sane to restore
+        return false;
+    }
+    struct timeval tv = {_lastGoodEpoch, 0};
+    settimeofday(&tv, nullptr);
+    esp_sntp_restart();  // converge to the exact NTP time
+    return true;
 }
 
 const char* NetTime::statusName(wl_status_t st) const {

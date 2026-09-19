@@ -7,19 +7,22 @@
 
 #include "bridge/ChronosBridge.h"
 #include "glance/GlanceClient.h"
+#include "net/Forecast.h"
 #include "net/NetTime.h"
+#include "net/WebPortal.h"
 
 // Minimal serial command interface for hardware bring-up and testing.
 // Type "help" for the command list.
 
 class Console {
 public:
-    Console(GlanceClient& client, ChronosBridge& bridge, NetTime& net)
-        : _client(client), _bridge(bridge), _net(net) {}
+    Console(GlanceClient& client, ChronosBridge& bridge, NetTime& net, Forecast& forecast,
+            WebPortal& portal)
+        : _client(client), _bridge(bridge), _net(net), _forecast(forecast), _portal(portal) {}
 
     void begin(unsigned long baud = 115200) {
         Serial.begin(baud);
-        _client.setPinProvider([]() -> uint32_t {
+        _client.setPinProvider([this]() -> uint32_t {
             // Drain input typed ahead while blocking ops were running,
             // otherwise a stale Enter would submit an empty PIN instantly.
             while (Serial.available() > 0) {
@@ -28,34 +31,66 @@ public:
             Serial.println();
             Serial.println("=============================================");
             Serial.println("Enter the PIN shown on the clock, then Enter:");
+            Serial.println("(serial, or http://glancebridge.local on your phone)");
             Serial.println("(you have 25 seconds - BLE pairing timeout)");
             Serial.println("=============================================");
+            _portal.setPending(true);
 
+            uint32_t pin = 0;
+            bool got = false;
+            char pbuf[16];
+            size_t pidx = 0;
             uint32_t start = millis();
             while (millis() - start < 25000) {
-                char line[16];
-                if (!readLine(line, sizeof(line), 25000 - (millis() - start))) {
+                // Web portal is served during the wait so a phone can
+                // submit the PIN headless.
+                _portal.handle();
+                if (_portal.pollWeb(pin)) {
+                    got = true;
                     break;
                 }
-                uint32_t passkey = 0;
-                int digits = 0;
-                for (const char* p = line; *p; p++) {
-                    if (*p >= '0' && *p <= '9') {
-                        passkey = passkey * 10 + (*p - '0');
-                        digits++;
-                    } else if (*p != ' ') {
-                        digits = 0;
-                        break;
+                // Serial line assembly (non-blocking, persists across calls).
+                while (Serial.available() > 0) {
+                    char c = (char)Serial.read();
+                    if (c == '\r' || c == '\n') {
+                        pbuf[pidx] = '\0';
+                        pidx = 0;
+                        uint32_t passkey = 0;
+                        int digits = 0;
+                        for (const char* p = pbuf; *p; p++) {
+                            if (*p >= '0' && *p <= '9') {
+                                passkey = passkey * 10 + (*p - '0');
+                                digits++;
+                            } else if (*p != ' ') {
+                                digits = 0;
+                                break;
+                            }
+                        }
+                        if (digits >= 1 && digits <= 6) {
+                            Serial.printf("[console] PIN entered: %06u\n", (unsigned)passkey);
+                            pin = passkey;
+                            got = true;
+                            break;
+                        }
+                    } else if (pidx + 1 < sizeof(pbuf)) {
+                        pbuf[pidx++] = c;
+                        Serial.print(c);  // echo
                     }
                 }
-                if (digits >= 1 && digits <= 6) {
-                    Serial.printf("[console] PIN entered: %06u\n", (unsigned)passkey);
-                    return passkey;
+                if (got) {
+                    break;
                 }
-                Serial.println("[console] empty or invalid PIN - type the digits shown on the clock");
+                delay(5);
             }
-            Serial.println("[console] PIN entry timed out");
-            return 0;
+            _portal.setPending(false);
+            if (!got) {
+                Serial.println("[console] PIN entry timed out");
+                return 0;
+            }
+            if (pin > 999999) {  // web submissions are digit-validated; belt+braces
+                return 0;
+            }
+            return pin;
         });
         printHelp();
         Serial.print("> ");
@@ -108,35 +143,14 @@ public:
     }
 
 private:
-    static bool readLine(char* buf, size_t bufLen, uint32_t timeoutMs) {
-        size_t idx = 0;
-        uint32_t start = millis();
-        while (millis() - start < timeoutMs) {
-            while (Serial.available() > 0) {
-                char c = (char)Serial.read();
-                if (c == '\r' || c == '\n') {  // CR, LF or CRLF all end the line
-                    buf[idx] = '\0';
-                    Serial.println();
-                    return true;
-                }
-                if (idx + 1 < bufLen) {
-                    buf[idx++] = c;
-                    Serial.print(c);
-                }
-            }
-            delay(10);
-        }
-        buf[idx] = '\0';
-        return false;
-    }
-
     static void printHelp() {
         Serial.println();
         Serial.println("Glance Clock bridge commands:");
         Serial.println("  scan [ms]          scan for Glance clocks (default 5000)");
         Serial.println("  pair               connect + pair (press clock's pairing button first)");
         Serial.println("  notify <text>      show a notification on the clock");
-        Serial.println("  stop|start         scene slot navigation (single-byte cmds 30/31)");
+        Serial.println("  stop|start         scene carousel: previous/next face (cmds 30/31)");
+        Serial.println("  face               (re)install the digital watchface as carousel slot 0");
         Serial.println("  clear              clear all scenes");
         Serial.println("  bonds              clear pairings stored in the clock");
         Serial.println("  night on|off       night mode (settings write)");
@@ -147,6 +161,8 @@ private:
         Serial.println("  settings           read the clock's published settings");
         Serial.println("  cfg [0-255]        write settings (read-modify-write; optional brightness)");
         Serial.println("  batt               read the clock's battery level");
+        Serial.println("  geo <lat> <lon>    store location for the forecast ring");
+        Serial.println("  wx [c|f]           fetch + show 24h forecast (unit persisted, default F)");
         Serial.println("  time               show the ESP32's local time");
         Serial.println("  settime ...        set local time: settime YYYY-MM-DD HH:MM:SS");
         Serial.println("  chronos on|off     start the Chronos peripheral / pause the relay");
@@ -154,8 +170,11 @@ private:
         Serial.println("  wifioff            clear stored WiFi credentials");
         Serial.println("  tz [posix]         show/set timezone, e.g. tz EST5EDT,M3.2.0,M11.1.0");
         Serial.println("  forget             forget stored clock address");
+        Serial.println("  disc               clean disconnect (bond-keep diagnostic)");
+        Serial.println("  mdns [name]        show/set the portal host (e.g. mdns attic)");
         Serial.println("  status             connection + settings");
         Serial.println("  raw <hex>          write raw bytes to the data characteristic");
+        Serial.println("  raws <hex>         write raw bytes to the scene characteristic");
         Serial.println("  help               this list");
         Serial.println();
     }
@@ -206,11 +225,10 @@ private:
         _client.pair();
     }
 
-    void handleRaw(const char* hex) {
-        uint8_t buf[256];
+    static size_t parseHex(const char* hex, uint8_t* buf, size_t cap) {
         size_t len = 0;
         int hi = -1;
-        for (const char* p = hex; *p && len < sizeof(buf); p++) {
+        for (const char* p = hex; *p && len < cap; p++) {
             int v;
             if (*p >= '0' && *p <= '9') v = *p - '0';
             else if (*p >= 'a' && *p <= 'f') v = *p - 'a' + 10;
@@ -223,8 +241,19 @@ private:
                 hi = -1;
             }
         }
-        Serial.printf("[console] writing %u bytes\n", (unsigned)len);
-        _client.sendCommand(buf, len);
+        return len;
+    }
+
+    void handleRaw(const char* hex, bool scene) {
+        uint8_t buf[256];
+        size_t len = parseHex(hex, buf, sizeof(buf));
+        Serial.printf("[console] writing %u bytes to %s\n", (unsigned)len,
+                      scene ? "scene char" : "data char");
+        if (scene) {
+            _client.sendSceneCommand(buf, len);
+        } else {
+            _client.sendCommand(buf, len);
+        }
     }
 
     void handle(const char* input) {
@@ -250,10 +279,10 @@ private:
                 Serial.println("[console] notify sent");
             }
         } else if (cmd == "stop") {
-            const uint8_t c = Glance::Cmd::ScenesStop;  // single byte, like the C# client
+            const uint8_t c = Glance::Cmd::ScenesStop;  // single byte = previous face
             _client.sendCommand(&c, 1);
         } else if (cmd == "start") {
-            const uint8_t c = Glance::Cmd::ScenesStart;  // single byte
+            const uint8_t c = Glance::Cmd::ScenesStart;  // single byte = next face
             _client.sendCommand(&c, 1);
         } else if (cmd == "clear") {
             _client.sendCommand(Glance::Cmd::ScenesClear, Glance::ScenePriority::BandSystem);
@@ -265,6 +294,10 @@ private:
         } else if (cmd == "calok") {
             const uint8_t c = Glance::Cmd::ConfirmCalibration;  // single byte
             _client.sendCommand(&c, 1);
+        } else if (cmd == "face") {
+            // Re-install the digital watchface as carousel slot 0 (auto-
+            // done once per boot after connect).
+            _client.installWatchfaceScene();
         } else if (cmd == "night" && (arg == "on" || arg == "off")) {
             // Night mode via settings write (the 40/41 command frames are
             // from the cloud era and rejected by this firmware).
@@ -315,6 +348,26 @@ private:
             }
         } else if (cmd == "batt") {
             _client.readBattery();
+        } else if (cmd == "geo") {
+            int sp = arg.indexOf(' ');
+            if (sp <= 0 || sp + 1 >= (int)arg.length()) {
+                Serial.println("[console] usage: geo <lat> <lon> (decimal degrees)");
+            } else {
+                _forecast.setLocation(arg.substring(0, sp), arg.substring(sp + 1));
+            }
+        } else if (cmd == "wx") {
+            // No arg = use the stored unit preference; c/f persists it.
+            arg.trim();
+            const char* unit = nullptr;
+            if (arg == "f" || arg == "F") {
+                unit = "f";
+            } else if (arg == "c" || arg == "C") {
+                unit = "c";
+            } else if (arg.length()) {
+                Serial.println("[console] usage: wx [c|f]");
+                return;
+            }
+            _forecast.fetch(unit);
         } else if (cmd == "time") {
             struct tm t;
             if (getLocalTime(&t)) {
@@ -369,6 +422,19 @@ private:
             _bridge.setRelay(false);
         } else if (cmd == "forget") {
             _client.forget();
+        } else if (cmd == "disc") {
+            _client.disconnect();
+        } else if (cmd == "mdns") {
+            if (arg.length() == 0) {
+                Serial.printf("[console] portal host: %s.local\n",
+                              _portal.hostname().c_str());
+                Serial.println("[console] set with: mdns <name> (letters, digits, hyphen)");
+            } else if (_portal.setHostname(arg)) {
+                Serial.printf("[console] portal host: %s.local\n",
+                              _portal.hostname().c_str());
+            } else {
+                Serial.println("[console] invalid name (1-32 letters, digits or hyphens)");
+            }
         } else if (cmd == "status") {
             Serial.printf(
                 "[console] connected=%d stored=%s relay=%d phone=%d settings=%s\n",
@@ -383,7 +449,9 @@ private:
                               _client.lastBattery());
             }
         } else if (cmd == "raw") {
-            handleRaw(arg.c_str());
+            handleRaw(arg.c_str(), false);
+        } else if (cmd == "raws") {
+            handleRaw(arg.c_str(), true);
         } else {
             Serial.printf("[console] unknown command '%s' (try 'help')\n", cmd.c_str());
             // Raw bytes of the line: a clean 'status' reported as unknown
@@ -399,6 +467,8 @@ private:
     GlanceClient& _client;
     ChronosBridge& _bridge;
     NetTime& _net;
+    Forecast& _forecast;
+    WebPortal& _portal;
     char _line[128] = {0};
     size_t _idx = 0;
     uint8_t _ansi = 0;  // ANSI escape-sequence parser state (0=none)

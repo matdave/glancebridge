@@ -31,6 +31,11 @@ public:
     String ssid() const { return _ssid; }
     String tz() const { return _tz; }
 
+    // Roll the system time back to the last NTP-derived value (used to
+    // reject a bad phone time push while NTP is authoritative). False when
+    // no sane snapshot exists.
+    bool restoreTime();
+
 private:
     void applyTz();
     const char* statusName(wl_status_t st) const;
@@ -42,5 +47,6 @@ private:
     bool _sntpStarted = false;
     bool _timeValid = false;
     wl_status_t _lastStatus = WL_DISCONNECTED;
+    int64_t _lastGoodEpoch = 0;
     uint32_t _nextCheckMs = 0;
 };
