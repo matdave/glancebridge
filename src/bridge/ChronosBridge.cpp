@@ -20,12 +20,15 @@ void ChronosBridge::begin() {
 
     _watch.setConfigurationCallback([](Config cfg, uint32_t a, uint32_t) {
         if (cfg == CF_TIME && a == 1) {
+            // ChronosESP32 already applied the phone time via settimeofday
+            // (it inherits ESP32Time) before this callback fires.
             struct tm t;
             if (getLocalTime(&t)) {
                 char buf[32];
                 strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &t);
                 Serial.printf("[bridge] phone time sync: %s\n", buf);
             }
+            s_instance->_glance.refreshClockTime();
         }
     });
 

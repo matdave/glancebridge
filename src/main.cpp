@@ -26,8 +26,18 @@ void setup() {
     bridge.begin();
 }
 
+static bool timeWasValid = false;
+
 void loop() {
     net.loop();
+    // When the system time first becomes valid (NTP sync), nudge the clock
+    // to re-poll the Current Time Service immediately instead of waiting
+    // for its own schedule.
+    bool timeValid = net.timeValid();
+    if (timeValid && !timeWasValid) {
+        glance.refreshClockTime();
+    }
+    timeWasValid = timeValid;
     glance.loop();
     timeServer.loop();
     bridge.loop();

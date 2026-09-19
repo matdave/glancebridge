@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <glance/GlanceCommands.h>
+#include <glance/GlanceMessages.h>
+#include <WiFi.h>
 
 #include "bridge/ChronosBridge.h"
 #include "glance/GlanceClient.h"
@@ -62,9 +64,27 @@ public:
     void poll() {
         while (Serial.available() > 0) {
             char c = (char)Serial.read();
-            // CR, LF or CRLF all end a line (empty lines are ignored, so a
-            // CRLF pair only executes the command once).
+            // Terminal line-editing keys: swallow ANSI escapes (arrow keys,
+            // history recall send ESC [ <x>) and treat BS/DEL as erase.
+            if (_ansi == 2) {  // final byte of an ESC [ x sequence
+                _ansi = 0;
+                continue;
+            }
+            if (_ansi == 1) {
+                if (c == '[' || c == 'O') {
+                    _ansi = 2;
+                } else {
+                    _ansi = 0;
+                }
+                continue;
+            }
+            if (c == 0x1b) {
+                _ansi = 1;
+                continue;
+            }
             if (c == '\r' || c == '\n') {
+                // CR, LF or CRLF all end a line (empty lines are ignored, so
+                // a CRLF pair only executes the command once).
                 if (_idx == 0) continue;
                 _line[_idx] = '\0';
                 Serial.println();
@@ -72,6 +92,13 @@ public:
                 _idx = 0;
                 Serial.print("> ");
                 return;
+            }
+            if (c == 0x08 || c == 0x7f) {
+                if (_idx > 0) {
+                    _idx--;
+                    Serial.print("\b \b");
+                }
+                continue;
             }
             if (_idx + 1 < sizeof(_line)) {
                 _line[_idx++] = c;
@@ -109,15 +136,17 @@ private:
         Serial.println("  scan [ms]          scan for Glance clocks (default 5000)");
         Serial.println("  pair               connect + pair (press clock's pairing button first)");
         Serial.println("  notify <text>      show a notification on the clock");
-        Serial.println("  stop               scenes stop (previous slot)");
-        Serial.println("  start              scenes start (next slot)");
+        Serial.println("  stop|start         scene slot navigation (single-byte cmds 30/31)");
         Serial.println("  clear              clear all scenes");
         Serial.println("  bonds              clear pairings stored in the clock");
-        Serial.println("  refresh            UpdateAndRefresh");
-        Serial.println("  night on|off       automatic night mode");
+        Serial.println("  night on|off       night mode (settings write)");
+        Serial.println("  calib              start hands calibration (clock spins hands to 12)");
+        Serial.println("  calok              confirm hands calibration");
         Serial.println("  gatt               dump the clock's GATT table");
         Serial.println("  sub on|off         (un)subscribe to the undocumented 8e400001 channel");
-        Serial.println("  settings           re-request the clock's settings");
+        Serial.println("  settings           read the clock's published settings");
+        Serial.println("  cfg [0-255]        write settings (read-modify-write; optional brightness)");
+        Serial.println("  batt               read the clock's battery level");
         Serial.println("  time               show the ESP32's local time");
         Serial.println("  settime ...        set local time: settime YYYY-MM-DD HH:MM:SS");
         Serial.println("  chronos on|off     start the Chronos peripheral / pause the relay");
@@ -129,6 +158,43 @@ private:
         Serial.println("  raw <hex>          write raw bytes to the data characteristic");
         Serial.println("  help               this list");
         Serial.println();
+    }
+
+    // Full settings message for a settings write: starts from the clock's
+    // last known values (falls back to safe defaults for fields the clock
+    // has not published), preserves DND/silent schedules when known, and
+    // sets every has_* flag so the write replaces nothing accidentally.
+    static Settings completeSettings(const Settings& src) {
+        Settings s = Settings_init_default;
+        s.has_nightModeEnabled = true;
+        s.nightModeEnabled = src.has_nightModeEnabled ? src.nightModeEnabled : true;
+        s.has_permanentDND = true;
+        s.permanentDND = src.has_permanentDND && src.permanentDND;
+        s.has_permanentMute = true;
+        s.permanentMute = src.has_permanentMute && src.permanentMute;
+        s.has_dateFormat = true;
+        s.dateFormat = src.has_dateFormat ? src.dateFormat
+                                          : Settings_DateFormat_DateDisabled;
+        s.has_pointsAlwaysEnabled = true;
+        s.pointsAlwaysEnabled = src.has_pointsAlwaysEnabled && src.pointsAlwaysEnabled;
+        s.has_displayBrightness = true;
+        s.displayBrightness = src.has_displayBrightness ? src.displayBrightness : 128;
+        s.has_timeModeEnable = true;
+        s.timeModeEnable = src.has_timeModeEnable ? src.timeModeEnable : true;
+        s.has_timeFormat12 = true;
+        s.timeFormat12 = src.has_timeFormat12 && src.timeFormat12;
+        s.has_mgrUserActivityTimeout = true;
+        s.mgrUserActivityTimeout =
+            src.has_mgrUserActivityTimeout ? src.mgrUserActivityTimeout : 600;
+        if (src.has_dnd) {
+            s.has_dnd = true;
+            s.dnd = src.dnd;
+        }
+        if (src.has_silent) {
+            s.has_silent = true;
+            s.silent = src.silent;
+        }
+        return s;
     }
 
     void handlePair() {
@@ -184,19 +250,33 @@ private:
                 Serial.println("[console] notify sent");
             }
         } else if (cmd == "stop") {
-            _client.sendCommand(Glance::Cmd::ScenesStop, Glance::ScenePriority::BandSystem);
+            const uint8_t c = Glance::Cmd::ScenesStop;  // single byte, like the C# client
+            _client.sendCommand(&c, 1);
         } else if (cmd == "start") {
-            _client.sendCommand(Glance::Cmd::ScenesStart, Glance::ScenePriority::BandSystem);
+            const uint8_t c = Glance::Cmd::ScenesStart;  // single byte
+            _client.sendCommand(&c, 1);
         } else if (cmd == "clear") {
             _client.sendCommand(Glance::Cmd::ScenesClear, Glance::ScenePriority::BandSystem);
         } else if (cmd == "bonds") {
             _client.sendCommand(Glance::Cmd::BondsClear, Glance::ScenePriority::BandSystem);
-        } else if (cmd == "refresh") {
-            _client.sendCommand(Glance::Cmd::UpdateAndRefresh, Glance::ScenePriority::BandSystem);
-        } else if (cmd == "night" && arg == "on") {
-            _client.sendCommand(Glance::Cmd::EnableAutomaticNightMode, Glance::ScenePriority::BandSystem);
-        } else if (cmd == "night" && arg == "off") {
-            _client.sendCommand(Glance::Cmd::DisableAutomaticNightMode, Glance::ScenePriority::BandSystem);
+        } else if (cmd == "calib") {
+            const uint8_t c = Glance::Cmd::StartCalibration;  // single byte
+            _client.sendCommand(&c, 1);
+        } else if (cmd == "calok") {
+            const uint8_t c = Glance::Cmd::ConfirmCalibration;  // single byte
+            _client.sendCommand(&c, 1);
+        } else if (cmd == "night" && (arg == "on" || arg == "off")) {
+            // Night mode via settings write (the 40/41 command frames are
+            // from the cloud era and rejected by this firmware).
+            Settings s = completeSettings(_client.lastSettings());
+            s.nightModeEnabled = (arg == "on");
+            Serial.printf("[console] writing settings with nightMode=%d\n",
+                          s.nightModeEnabled ? 1 : 0);
+            if (_client.writeSettings(&s)) {
+                Serial.println("[console] settings written - now run 'settings'");
+            }
+        } else if (cmd == "night") {
+            Serial.println("[console] usage: night on|off");
         } else if (cmd == "gatt") {
             _client.dumpGattTable();
         } else if (cmd == "sub" && arg == "on") {
@@ -205,6 +285,36 @@ private:
             _client.subscribePush(false);
         } else if (cmd == "settings") {
             _client.readSettings();
+        } else if (cmd == "cfg") {
+            // Read-modify-write settings write (replaces everything on the
+            // clock, based on the last decoded values). Optional brightness
+            // makes the change visible; 'settings' afterwards re-reads.
+            Settings s = completeSettings(_client.lastSettings());
+            bool valid = true;
+            for (const char* p = arg.c_str(); *p; p++) {
+                if (*p < '0' || *p > '9') {
+                    valid = false;
+                    break;
+                }
+            }
+            long b = arg.toInt();
+            if (arg.length() == 0) {
+                // keep current/default brightness
+            } else if (valid && b >= 0 && b <= 255) {
+                s.displayBrightness = (int)b;
+            } else {
+                Serial.println("[console] usage: cfg [0-255] (brightness; omit to keep current)");
+                return;
+            }
+            Serial.printf("[console] writing settings (night=%d dnd=%d mute=%d 24h=%d bright=%d)\n",
+                          s.nightModeEnabled ? 1 : 0, s.permanentDND ? 1 : 0,
+                          s.permanentMute ? 1 : 0, s.timeFormat12 ? 1 : 0,
+                          s.displayBrightness);
+            if (_client.writeSettings(&s)) {
+                Serial.println("[console] settings written - now run 'settings'");
+            }
+        } else if (cmd == "batt") {
+            _client.readBattery();
         } else if (cmd == "time") {
             struct tm t;
             if (getLocalTime(&t)) {
@@ -230,6 +340,7 @@ private:
                 struct timeval tv = {epoch, 0};
                 settimeofday(&tv, nullptr);
                 Serial.printf("[console] system time set to %s\n", arg.c_str());
+                _client.refreshClockTime();
             } else {
                 Serial.println("[console] usage: settime YYYY-MM-DD HH:MM:SS");
             }
@@ -264,10 +375,24 @@ private:
                 _client.isConnected() ? 1 : 0, _client.storedAddress().c_str(),
                 _bridge.relayEnabled() ? 1 : 0, _bridge.phoneConnected() ? 1 : 0,
                 _client.lastSettingsHex().c_str());
+            Serial.printf("[console] wifi=%d(%s) ntp=%d heap=%u\n", (int)WiFi.status(),
+                          _net.isConnected() ? "up" : "down", _net.timeValid() ? 1 : 0,
+                          (unsigned)ESP.getFreeHeap());
+            if (_client.lastBattery() >= 0) {
+                Serial.printf("[console] clock battery (last): %d%%\n",
+                              _client.lastBattery());
+            }
         } else if (cmd == "raw") {
             handleRaw(arg.c_str());
         } else {
             Serial.printf("[console] unknown command '%s' (try 'help')\n", cmd.c_str());
+            // Raw bytes of the line: a clean 'status' reported as unknown
+            // means invisible chars (control bytes) reached the buffer.
+            Serial.printf("[console] raw line bytes:");
+            for (const char* p = input; *p; p++) {
+                Serial.printf(" %02x", (uint8_t)*p);
+            }
+            Serial.println();
         }
     }
 
@@ -276,4 +401,5 @@ private:
     NetTime& _net;
     char _line[128] = {0};
     size_t _idx = 0;
+    uint8_t _ansi = 0;  // ANSI escape-sequence parser state (0=none)
 };
