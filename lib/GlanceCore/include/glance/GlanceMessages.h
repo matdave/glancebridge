@@ -36,4 +36,8 @@ size_t encodeNotifyCommand(uint8_t* out, size_t cap, const char* text,
 // Returns true on success.
 bool decodeSettings(const uint8_t* data, size_t len, Settings* out);
 
+// Encode a Settings message (payload only, no command header) for the
+// [5,0,0,0] settings-write command. Fields with has_* false are omitted.
+size_t encodeSettings(uint8_t* out, size_t cap, const Settings* s);
+
 }  // namespace Glance

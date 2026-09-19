@@ -82,3 +82,29 @@ void test_notify_text_truncates_to_max_size() {
     TEST_ASSERT_TRUE(len < sizeof(buf));
 }
 
+void test_settings_encode_decode_roundtrip() {
+    Settings s = Settings_init_default;
+    s.has_nightModeEnabled = true;
+    s.nightModeEnabled = true;
+    s.has_displayBrightness = true;
+    s.displayBrightness = 200;
+    s.has_timeModeEnable = true;
+    s.timeModeEnable = true;
+    s.has_timeFormat12 = true;
+    s.timeFormat12 = false;
+    s.has_dateFormat = true;
+    s.dateFormat = Settings_DateFormat_DateDisabled;
+    uint8_t buf[80];
+    size_t len = Glance::encodeSettings(buf, sizeof(buf), &s);
+    TEST_ASSERT_TRUE(len > 0);
+    Settings out;
+    TEST_ASSERT_TRUE(Glance::decodeSettings(buf, len, &out));
+    TEST_ASSERT_TRUE(out.has_nightModeEnabled);
+    TEST_ASSERT_TRUE(out.nightModeEnabled);
+    TEST_ASSERT_EQUAL_INT32(200, out.displayBrightness);
+    TEST_ASSERT_TRUE(out.has_timeModeEnable);
+    TEST_ASSERT_TRUE(out.timeModeEnable);
+    TEST_ASSERT_FALSE(out.timeFormat12);
+    TEST_ASSERT_EQUAL_INT32(Settings_DateFormat_DateDisabled, out.dateFormat);
+}
+

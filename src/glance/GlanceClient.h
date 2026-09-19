@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <glance/GlanceMessages.h>
 
 #include <functional>
 
@@ -48,9 +49,31 @@ public:
     // Convenience: notify with text (see GlanceMessages.h for option defaults).
     bool sendNotice(const char* text);
 
-    // Request + read the clock's current settings (needs a refresh first;
-    // this is what the official web app does). Diagnostics.
+    // Read the clock's settings: plain read of the data characteristic; if
+    // empty, request a refresh with single-byte cmd 35 (4-byte frame form is
+    // rejected, vendor ATT 0x81) and poll. Best effort - the clock often
+    // publishes nothing. Diagnostics only.
     bool readSettings();
+
+    // Last successfully decoded settings from the clock (defaults until the
+    // first successful read). Base for read-modify-write settings changes.
+    Settings lastSettings() const { return _lastSettings; }
+
+    // Write a complete Settings message ([5,0,0,0] + protobuf, the path the
+    // HA integration uses for brightness/mode changes). Replaces ALL clock
+    // settings - callers must fill every field.
+    bool writeSettings(const Settings* s);
+
+    // Read the clock's battery level (standard 0x180F/0x2A19). Returns
+    // percent 0-100, or -1 if unavailable. Cached for status.
+    int readBattery();
+    int lastBattery() const { return _battPercent; }
+
+    // Reconnect the clock so it re-polls the Current Time Service with the
+    // fresh system time (call when the time source changes: first NTP sync,
+    // phone time sync, settime). No-op when not connected - the regular
+    // reconnect covers that case.
+    void refreshClockTime();
 
     // Dump the clock's full GATT table (names + values) over serial.
     void dumpGattTable();
@@ -81,6 +104,8 @@ private:
 
     NimBLEClient* _client = nullptr;
     NimBLERemoteCharacteristic* _dataChar = nullptr;
+    NimBLERemoteCharacteristic* _battChar = nullptr;
+    int _battPercent = -1;
     bool _connected = false;
     bool _authenticated = false;
     bool _scanning = false;
@@ -98,4 +123,5 @@ private:
     uint8_t _storedType = 0;
     uint32_t _nextReconnectMs = 0;
     String _settingsHex;
+    Settings _lastSettings = Settings_init_default;
 };

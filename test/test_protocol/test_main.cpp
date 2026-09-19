@@ -10,6 +10,7 @@ void test_settings_decode(void);
 void test_settings_decode_partial(void);
 void test_make_command_rejects_small_buffer(void);
 void test_notify_text_truncates_to_max_size(void);
+void test_settings_encode_decode_roundtrip(void);
 
 int main(void) {
     UNITY_BEGIN();
@@ -20,5 +21,6 @@ int main(void) {
     RUN_TEST(test_settings_decode_partial);
     RUN_TEST(test_make_command_rejects_small_buffer);
     RUN_TEST(test_notify_text_truncates_to_max_size);
+    RUN_TEST(test_settings_encode_decode_roundtrip);
     return UNITY_END();
 }

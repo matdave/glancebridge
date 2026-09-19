@@ -129,6 +129,7 @@ void GlanceClient::onDisconnect(NimBLEClient* pClient, int reason) {
     _connected = false;
     _authenticated = false;
     _dataChar = nullptr;
+    _battChar = nullptr;
     Serial.printf("[%s] disconnected, reason=0x%04x\n", TAG, reason);
 }
 
@@ -263,9 +264,12 @@ bool GlanceClient::discoverDataCharacteristic() {
         Serial.printf("[%s] data characteristic not found\n", TAG);
         return false;
     }
-    // Settings read is manual ('settings' console command): it sends
-    // command 35 first, which shows the cloud-update animation on the
-    // clock - not something wanted on every reconnect.
+    // Settings read is manual ('settings' console command): a plain read of
+    // the data characteristic. It never triggers the cloud-update animation.
+    // Also cache the standard battery characteristic (0x180F/0x2A19) for the
+    // 'batt' command; optional - failure here doesn't affect commands.
+    NimBLERemoteService* battSvc = _client->getService(NimBLEUUID((uint16_t)0x180F));
+    _battChar = battSvc ? battSvc->getCharacteristic(NimBLEUUID((uint16_t)0x2A19)) : nullptr;
     return true;
 }
 
@@ -284,37 +288,37 @@ bool GlanceClient::readSettings() {
     if (_dataChar == nullptr) {
         return false;
     }
-    // Command 35 (UpdateAndRefresh) makes the clock publish its current data
-    // into the readable value ("prepare device for settings changes" in the
-    // official web app, as observed by the glance_clock_ha integration).
-    if (!sendCommand(Glance::Cmd::UpdateAndRefresh, 0, 0, 0)) {
-        return false;
-    }
-    for (int t = 0; t < 10; t++) {
-        delay(300);
+    // Read + strip + decode whatever the data characteristic holds. Envelopes
+    // seen in the wild: "Data\0" + protobuf, [5,0,0,0] + protobuf, or a
+    // single 0x05 byte before the protobuf. (A raw protobuf can never start
+    // with 0x05: that would be field 0.)
+    auto readPublished = [this]() -> bool {
         NimBLEAttValue v = _dataChar->readValue();
         if (v.length() < 5) {
-            continue;
+            return false;
         }
-        // The value is prefixed with "Data\0"; protobuf follows. Sometimes a
-        // raw command frame (first byte = command id) is returned instead.
         const uint8_t* p = (const uint8_t*)v.data();
         size_t len = v.length();
         if (memcmp(p, "Data", 4) == 0 && p[4] == 0x00) {
             p += 5;
             len -= 5;
+        } else if (p[0] == Glance::Cmd::Settings && p[1] == 0x00 && p[2] == 0x00 &&
+                   p[3] == 0x00) {
+            p += 4;
+            len -= 4;
         } else if (p[0] == Glance::Cmd::Settings) {
             p += 1;
             len -= 1;
         }
         if (len == 0) {
-            continue;
+            return false;
         }
         _settingsHex = toHex(p, len);
         Serial.printf("[%s] settings read (%u bytes): %s\n", TAG, (unsigned)len,
                       _settingsHex.c_str());
         Settings settings;
         if (Glance::decodeSettings(p, len, &settings)) {
+            _lastSettings = settings;
             Serial.printf("[%s] settings: nightMode=%d brightness=%d 12h=%d\n", TAG,
                           settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
                           settings.timeFormat12 ? 1 : 0);
@@ -322,9 +326,71 @@ bool GlanceClient::readSettings() {
         }
         Serial.printf("[%s] settings decode failed\n", TAG);
         return false;
+    };
+
+    // HA integration flow: plain read first; if nothing is published, send
+    // command 35 (UpdateAndRefresh) as a SINGLE byte - the 4-byte frame is
+    // rejected with vendor ATT error 0x81, and sendCommand() falls back to a
+    // no-response write which the clock accepts - then poll the read again.
+    if (readPublished()) {
+        return true;
     }
-    Serial.printf("[%s] settings read: no data published after refresh\n", TAG);
+    Serial.printf("[%s] nothing published; requesting refresh (single-byte cmd 35)\n", TAG);
+    const uint8_t refresh[] = {Glance::Cmd::UpdateAndRefresh};
+    if (!sendCommand(refresh, sizeof(refresh))) {
+        Serial.printf("[%s] refresh request failed\n", TAG);
+        return false;
+    }
+    for (int poll = 0; poll < 10; poll++) {
+        delay(300);
+        if (readPublished()) {
+            return true;
+        }
+    }
+    Serial.printf("[%s] settings read: nothing published in data characteristic\n", TAG);
     return false;
+}
+
+bool GlanceClient::writeSettings(const Settings* s) {
+    uint8_t payload[80];
+    size_t payloadLen = Glance::encodeSettings(payload, sizeof(payload), s);
+    if (payloadLen == 0) {
+        Serial.printf("[%s] settings encode failed\n", TAG);
+        return false;
+    }
+    // HA-style settings write: [5,0,0,0] + complete Settings protobuf. This
+    // replaces all settings on the clock - callers must send every field.
+    return sendCommand(Glance::Cmd::Settings, 0, 0, 0, payload, payloadLen);
+}
+
+// ------------------------------------------------------------------ battery
+
+int GlanceClient::readBattery() {
+    if (!isConnected()) {
+        Serial.printf("[%s] not connected\n", TAG);
+        return -1;
+    }
+    if (_battChar == nullptr) {
+        NimBLERemoteService* svc = _client->getService(NimBLEUUID((uint16_t)0x180F));
+        _battChar = svc ? svc->getCharacteristic(NimBLEUUID((uint16_t)0x2A19)) : nullptr;
+        if (_battChar == nullptr || !_battChar->canRead()) {
+            Serial.printf("[%s] battery characteristic not available\n", TAG);
+            _battChar = nullptr;
+            return -1;
+        }
+    }
+    NimBLEAttValue v = _battChar->readValue();
+    if (v.length() < 1) {
+        Serial.printf("[%s] battery read: empty value\n", TAG);
+        return -1;
+    }
+    uint8_t pct = v.data()[0];
+    if (pct > 100) {
+        pct = 100;  // some firmwares report raw 0-255
+    }
+    _battPercent = pct;
+    Serial.printf("[%s] battery: %u%%\n", TAG, (unsigned)pct);
+    return pct;
 }
 
 // ----------------------------------------------------------------- commands
@@ -342,6 +408,16 @@ bool GlanceClient::sendCommand(const uint8_t* data, size_t len) {
             return true;
         }
         Serial.printf("[%s] write failed (attempt %d/3)\n", TAG, attempt);
+        // The clock rejects some commands (e.g. command 35) as with-response
+        // writes with vendor ATT error 0x81, but accepts them as writes
+        // without response - the HA integration falls back exactly this way
+        // for every command. A no-response write gives no ACK either way, so
+        // treat acceptance as unconfirmed (the caller's follow-up read/write
+        // is the real test).
+        if (_dataChar->writeValue(data, len, false)) {
+            Serial.printf("[%s] no-response write accepted\n", TAG);
+            return true;
+        }
         delay(100);
     }
     return false;
@@ -364,6 +440,18 @@ bool GlanceClient::sendNotice(const char* text) {
         return false;
     }
     return sendCommand(frame, len);
+}
+
+// --------------------------------------------------------------------- time
+
+void GlanceClient::refreshClockTime() {
+    if (!isConnected()) {
+        return;
+    }
+    Serial.printf("[%s] time changed - reconnecting clock so it re-polls the time service\n",
+                  TAG);
+    _client->disconnect();
+    _nextReconnectMs = 0;  // reconnect on the next loop() pass
 }
 
 // ------------------------------------------------------------------ forget

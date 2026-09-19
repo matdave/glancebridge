@@ -69,4 +69,15 @@ bool decodeSettings(const uint8_t* data, size_t len, Settings* out) {
     return pb_decode(&stream, Settings_fields, out);
 }
 
+size_t encodeSettings(uint8_t* out, size_t cap, const Settings* s) {
+    if (out == nullptr || cap == 0 || s == nullptr) {
+        return 0;
+    }
+    pb_ostream_t stream = pb_ostream_from_buffer(out, cap);
+    if (!pb_encode(&stream, Settings_fields, s)) {
+        return 0;
+    }
+    return stream.bytes_written;
+}
+
 }  // namespace Glance
