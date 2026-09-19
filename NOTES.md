@@ -16,20 +16,85 @@ classic ESP32, clock = `GlanceClock_3B e3:75:8d:6f:22:c8`, bonded):**
 - WiFi + NTP (`wifi`, `tz` → NetTime) — validated incl. runtime re-connect
 - CTS push nudge on time change (NTP first sync / settime / phone sync →
   reconnect → clock re-polls) — built; hands-follow-time confirmed working
+- **Forecast ring (VALIDATED after DFU)**: `geo <lat> <lon>` (NVS "weather"
+  ns) + `wx [c|f]`; class `Forecast` (renamed from Weather — ChronosESP32.h
+  has struct Weather). Open-Meteo HTTPS (setInsecure, ArduinoJson),
+  24×hourly temps from the current local hour, frame `[7,16,24,1]` +
+  ForecastScene via `Glance::encodeForecastCommand` (native-tested).
+  Timestamp = API's unixtime value directly (timeformat=unixtime +
+  timezone=auto returns localtime-as-epoch, exactly what the proto wants).
+  Auto-refetch every 30 min. **cmd 7 accepted on firmware 1.5** (was 0x81
+  on factory 0.8.56). Unit persisted (default F); auto-hide after 15 s →
+  single-byte ScenesStart (31, "next face") advances past the ring back to
+  the native watchface: auto-hide DELETES the scene (cmd 33 ScenesDelete,
+  [33,0,0,1] per C# DeleteSceneCommand). User feedback drove this: 30/31
+  are carousel-nav only (C# advances its weather carousel with 31), empty
+  slots and the mode-8 watchface CustomScene ([0,0,8,slot], C#
+  DigitalTimeSceneCommand) render DIM on firmware 1.5 - so no auto slot-0
+  install (manual `face` command kept for experiments).
 - ChronosBridge: phone time sync + notification relay — built, starts at
   boot; status shows phone=0 until the Chronos app test is actually run
+- **KNOWN TRANSIENT — BLE controller crash**: `ASSERT_PARAM(0 0) in llc.c
+  / r_llc_start` (Guru Meditation, Core 0) when the Chronos phone
+  connection and the clock connection are established simultaneously
+  (classic-ESP32 controller race in `r_llm_con_req_tx_cfm`). Recovers on
+  reboot; recurred twice when phone+clock connected together. Mitigation
+  applied: boot stagger — first clock reconnect delayed 5s so the phone
+  link settles first.
+- **CLOCK drops its bond when the central disconnects abnormally**
+  (firmware 1.5): ESP32-side bond persists (boot log
+  `ESP32 bond for clock: present`), the clock KEEPS the bond across its own
+  power cycle, but any ESP32 unplug/reflash (supervision timeout on the
+  clock) → clock deletes the bond → next connect demands a PIN. Self-
+  healing: the reconnect-PIN flow prompts for the PIN and re-pairs both
+  sides (onPassKeyEntry explains it outside pair()). `disc` console
+  command = clean disconnect diagnostic: if a clean disconnect+reconnect
+  does NOT demand a PIN, the trigger is specifically the abnormal link
+  loss. Unfixable from our side (clock security policy requires the PIN
+  for re-pairing). **Web portal (src/net/WebPortal.h, renamed from
+  PinPortal)** at http://glancebridge.local (mDNS) / device IP:
+  / status (auto-refresh), /enter PIN form (NO refresh so typing is safe;
+  the pending redirect MUST use meta content='0; url=/enter' - an unquoted
+  "content=0 URL=..." parses as reload-every-0s and hammer-refreshes),
+  /weather (geo lat/lon + C/F unit + fetch-now), /control (carousel
+  prev/next, calib/calok, clear scenes; GET ops redirect so refresh can't
+  re-trigger). The mDNS host is configurable per device
+  (`mdns <name>` serial command, NVS "portal"/"host", validated
+  letters/digits/hyphens, default glancebridge) so multiple bridges can
+  coexist on one LAN. When a PIN is requested the console provider marks it
+  pending and its 25s wait loop services HTTP (the main loop is blocked
+  by the wait). Serial console still works in parallel; missed PIN rounds
+  are cheap (the clock shows a fresh PIN on each retry).
 
 **Built, committed, but NOT yet hardware-validated:**
 - WiFi + NTP (`wifi <ssid> <pass>`, `tz <posix>` → NetTime) → time syncs
 - Current Time Service (clock polls it after connecting → hands follow ESP32 time)
-- **CTS push nudge (built, untested)**: when system time first becomes valid
-  (NTP) — and on `settime` and phone time sync — the clock is disconnected
-  and immediately reconnected (`GlanceClient::refreshClockTime()`), forcing
-  it to re-poll CTS right away instead of waiting for its own schedule.
+- **CTS push nudge (VALIDATED with a fix)**: when system time first becomes
+  valid (NTP) — and on `settime` and phone time sync — the clock is
+  disconnected and reconnected (`GlanceClient::refreshClockTime()`), forcing
+  it to re-poll CTS right away. Nudges are debounced (3s window — the
+  Chronos app sends CF_TIME twice) and the reconnect waits 1500ms for the
+  GAP disconnect to settle (immediate reconnect gets refused: "Client not
+  disconnected, cannot connect" + rc=7 discovery failures, reason 0x0216;
+  500ms occasionally failed with "Connection failed; status=574"
+  = BLE_ERR_CONN_ESTABLISHMENT — clock not ready yet).
   Chronos note: ChronosESP32 inherits ESP32Time and applies the phone time
   via settimeofday BEFORE our CF_TIME callback fires.
-- ChronosBridge: phone via Chronos app → time sync (CF_TIME → settimeofday →
-  CTS) and notification relay (app: title → Notice). Starts at boot.
+- ChronosBridge: phone via Chronos app → notification relay (app: title →
+  Notice) + battery to the phone. Starts at boot.
+- **Phone time skew ROOT-CAUSED + FIXED 2026-09-19**: the app's packet is
+  CORRECT (raw dump decoded: `AB 00 0B FF 93 80 00 07 EA 09 13 <hh> <mm>
+  <ss>` — the +1h came from ChronosESP32 applying components via
+  ESP32Time::setTime which built `struct tm` with **tm_isdst = 0**
+  ("standard time"), so mktime converted at CST (+6) while readback applied
+  CDT (−5) → +1h whenever DST is active. **Local patch in
+  .pio/libdeps/.../ESP32Time/ESP32Time.cpp line ~71: tm_isdst = -1** —
+  VALIDATED on hardware (packet hour now parses correctly). The temporary
+  raw-dump patch in ChronosESP32.cpp has been REMOVED. Policy: NTP is
+  authoritative (phone push rolled back while NTP valid; accepted only
+  pre-NTP). NOTE: the tm_isdst patch is lost if the library reinstalls —
+  re-apply or vendor the libs. Coex connect robustness: client connect
+  timeout raised 5s → 10s (status 13 = BLE_HS_ETIMEOUT under 3-link load).
 - `settime YYYY-MM-DD HH:MM:SS` manual time setting
 - WiFi + NTP (`wifi <ssid> <pass>`, `tz <posix>` → NetTime) → time syncs
   **(VALIDATED 2026-09-19: boot connect + runtime `wifioff`→`wifi` both work;
@@ -67,6 +132,24 @@ classic ESP32, clock = `GlanceClock_3B e3:75:8d:6f:22:c8`, bonded):**
   in both 4-byte and single-byte form (clock is cloud-less; cmd 35 = "pull
   from Glance cloud"). No-response writes go out but publish nothing.
   Leave as-is (sendCommand's no-response fallback is harmless + HA-proven).
+- **Firmware identified 2026-09-19 (gatt dump)**: clock runs factory
+  **app 0.8.56** (fw rev "0.8.56", sw rev `0503029A 0009 008C 0008 0038` =
+  bl 0.9, SD 8C, app 0.8, build 56), hw rev 5.3 (0x2A27), model "666".
+  This explains the 0x81 rejections: HA/C# users typically run 1.5.x+.
+  Matching DFU zip for hw 5.3:
+  `glance_firmware_full_0503029A0011008C0105000A.zip` (bl 0.17, app 1.5,
+  build 10) in Hypfer/glance-clock-assets/firmwares (the 0601 zips are for
+  newer hardware). Flash via nRF Connect/nRF Toolbox DFU. Bond may not
+  survive the update — re-run `pair` (PIN flow) if reconnect fails; hands
+  may need recalibration (`calib`/`calok`).
+- **Scene char (5075ffac) has a hard write-length limit**: writing the
+  80-byte forecast frame → rc 269 = 0x100+0x0D =
+  BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN. Dead end for large scene frames
+  regardless of firmware; the `wxs` probe was removed after the DFU made
+  the data path work. `raws <hex>` remains for small manual probes and
+  sendSceneCommand no longer masks rejections as no-response success.
+  State char (5075fc78) read 0x04 this session (was 0x00 earlier —
+  meaning unknown, possibly scene/mode indicator).
 - Undocumented service `8e400001-f315-4f60-9fb8-838830daea50`
   (read+write+notify, CCCD subscribable via `sub on|off`): purpose unknown.
   Suspected response/push channel. Subscribing did not affect anything.
@@ -97,8 +180,10 @@ Full GATT table dump (see `gatt` command) — Glance service
   12=12h, 13=activityTimeout (`68 D8 04` = 600).
 - **Single-byte commands are a real firmware pattern**: 35 (UpdateAndRefresh,
   HA), 60/61 (brightness scene stop/start, HA), 10 (TimerStop), 30/31
-  (scene nav, direction unverified, C#). 4-byte frames for 35 are rejected
-  (ATT 0x81); send single-byte commands as one byte only.
+  (scene carousel nav — C#-VALIDATED: 30 = "previous face", 31 = "next
+  face", the C# weather carousel advances with 31 every 15s; neither
+  dismisses a scene, the watchface is just slot 0 in the carousel).
+  4-byte frames for 35 are rejected (ATT 0x81); single-byte only.
 - HA forecast command header: `[7, 16, 24, 1]` (cmd 7, priority 16, 24
   hours, slot 1) + ForecastScene protobuf (timestamp, max, min, maxColor,
   minColor, values=24x Int16LE, template bytes).
@@ -166,10 +251,12 @@ partition at 1.31MB; we were at 97% full). **Do not delete this file.**
      "GlanceBridge" → `status` shows `phone=1`, log shows
      `[bridge] phone time sync: ...` → hands re-sync to phone time
    - Trigger a phone notification → `[bridge] relayed: ...` + clock display
-3. Phase 3 backlog: ForecastScene (24h hourly forecast from Chronos → ring
-   display), alarms (Chronos Alarm struct → Alarms protobuf), CallScene from
-   ringer callback. All protobufs already generated in lib/GlanceCore. The
-   C# GlanceProtocol.cs has validated ring/forecast frame builders to port.
+3. Phase 3 backlog: clock battery → Chronos app (VALIDATED: 98% pushed on
+   connect + on change). Then ForecastScene (built, see section 1), alarms
+   (Chronos Alarm struct → Alarms protobuf), CallScene from ringer callback.
+   All protobufs already generated in lib/GlanceCore. The C#
+   GlanceProtocol.cs has validated ring builders to port (NumbersRingCommand
+   for rain/wind/humidity rings).
 
 ## 5. Handy facts
 
@@ -184,6 +271,16 @@ partition at 1.31MB; we were at 97% full). **Do not delete this file.**
   does its own filtered discovery.
 - `NimBLEDevice::init()` is idempotent (safe when ChronosESP32::begin()
   calls it again); both roles share the NimBLE server singleton.
+- **Bond vs DFU**: the firmware DFU wipes the CLOCK's bond store; the
+  ESP32 keeps its stored address, so "reconnects" demand a PIN. On a PIN
+  request during a non-pairing reconnect, GlanceClient explains this and
+  lets the user re-pair through the normal PIN flow (re-establishes both
+  sides). Boot log prints ESP32-side bond presence
+  (`NimBLEDevice::getNumBonds()` scan for the stored address) so a
+  MISSING bond (NVS wiped on our side) is distinguishable from a clock-side
+  bond loss. If the PIN is demanded after EVERY ESP32 reflash while the
+  boot log says "bond: present", the CLOCK is dropping the bond on
+  central disconnect (firmware behavior) — not our NVS.
 - Serial console: pio device monitor does NOT echo typed chars and sends
   `\r` on Enter — Console now echoes + handles CR/LF/CRLF + shows `> `
   prompt. PIN entry drains stale input and validates digits (typed-ahead
