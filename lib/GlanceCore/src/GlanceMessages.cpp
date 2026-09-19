@@ -80,4 +80,25 @@ size_t encodeSettings(uint8_t* out, size_t cap, const Settings* s) {
     return stream.bytes_written;
 }
 
+size_t encodeForecastScene(uint8_t* out, size_t cap, const ForecastScene* fs) {
+    if (out == nullptr || cap == 0 || fs == nullptr) {
+        return 0;
+    }
+    pb_ostream_t stream = pb_ostream_from_buffer(out, cap);
+    if (!pb_encode(&stream, ForecastScene_fields, fs)) {
+        return 0;
+    }
+    return stream.bytes_written;
+}
+
+size_t encodeForecastCommand(uint8_t* out, size_t cap, const ForecastScene* fs) {
+    uint8_t payload[96];
+    size_t payloadLen = encodeForecastScene(payload, sizeof(payload), fs);
+    if (payloadLen == 0) {
+        return 0;
+    }
+    // [7, 16, 24, 1]: SaveForecastScene, medium priority, 24 hours, slot 1.
+    return makeCommand(out, cap, Cmd::SaveForecastScene, ScenePriority::BandMedium, 24, 1,
+                       payload, payloadLen);
+}
 }  // namespace Glance

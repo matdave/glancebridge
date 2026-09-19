@@ -40,4 +40,13 @@ bool decodeSettings(const uint8_t* data, size_t len, Settings* out);
 // [5,0,0,0] settings-write command. Fields with has_* false are omitted.
 size_t encodeSettings(uint8_t* out, size_t cap, const Settings* s);
 
+// Encode a ForecastScene message (payload only). The caller must fill all
+// required fields: timestamp (localtime-as-epoch, hour aligned), max/min,
+// maxColor/minColor (RGB), values (24x Int16LE) and templateText.
+size_t encodeForecastScene(uint8_t* out, size_t cap, const ForecastScene* fs);
+
+// Encode a full forecast command: header [7, prio=16, hours=24, slot=1].
+// Frame layout per the HA integration / Glance web app.
+size_t encodeForecastCommand(uint8_t* out, size_t cap, const ForecastScene* fs);
+
 }  // namespace Glance

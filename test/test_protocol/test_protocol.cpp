@@ -108,3 +108,47 @@ void test_settings_encode_decode_roundtrip() {
     TEST_ASSERT_EQUAL_INT32(Settings_DateFormat_DateDisabled, out.dateFormat);
 }
 
+void test_forecast_command_frame() {
+    // Header must be [7, 16, 24, 1] (SaveForecastScene, medium prio, 24h,
+    // slot 1) per the HA integration / web app, followed by the protobuf.
+    ForecastScene fs = ForecastScene_init_default;
+    fs.timestamp = 1780000000LL;  // local wall time encoded as epoch
+    fs.maxColor = 0xFF0000;
+    fs.minColor = 0x0000FF;
+    fs.max = 30;
+    fs.min = 10;
+    for (int i = 0; i < 24; i++) {
+        int16_t v = (int16_t)(10 + i);  // rising temps
+        fs.values.bytes[i * 2] = (uint8_t)(v & 0xFF);
+        fs.values.bytes[i * 2 + 1] = (uint8_t)(v >> 8);
+    }
+    fs.values.size = 48;
+    static const uint8_t tmpl[] = {0xC2, 0x8F, 0x08, 0xC2, 0xB0, 0x43};
+    memcpy(fs.templateText.bytes, tmpl, sizeof(tmpl));
+    fs.templateText.size = sizeof(tmpl);
+
+    uint8_t buf[128];
+    size_t len = Glance::encodeForecastCommand(buf, sizeof(buf), &fs);
+    TEST_ASSERT_TRUE(len > 4);
+    TEST_ASSERT_EQUAL_HEX8(0x07, buf[0]);   // SaveForecastScene
+    TEST_ASSERT_EQUAL_HEX8(0x10, buf[1]);   // priority 16
+    TEST_ASSERT_EQUAL_HEX8(0x18, buf[2]);   // 24 hours
+    TEST_ASSERT_EQUAL_HEX8(0x01, buf[3]);   // slot 1
+    // Payload decodes back into the same scene.
+    ForecastScene out;
+    pb_istream_t stream = pb_istream_from_buffer(buf + 4, len - 4);
+    TEST_ASSERT_TRUE(pb_decode(&stream, ForecastScene_fields, &out));
+    TEST_ASSERT_EQUAL_INT64(1780000000LL, out.timestamp);
+    TEST_ASSERT_EQUAL_INT32(30, out.max);
+    TEST_ASSERT_EQUAL_INT32(10, out.min);
+    TEST_ASSERT_EQUAL_UINT(48, out.values.size);
+    int16_t first = (int16_t)(out.values.bytes[0] | (out.values.bytes[1] << 8));
+    int16_t last =
+        (int16_t)(out.values.bytes[46] | (out.values.bytes[47] << 8));
+    TEST_ASSERT_EQUAL_INT16(10, first);
+    TEST_ASSERT_EQUAL_INT16(33, last);
+    TEST_ASSERT_EQUAL_UINT(sizeof(tmpl), out.templateText.size);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(tmpl, out.templateText.bytes, sizeof(tmpl));
+}
+
+
