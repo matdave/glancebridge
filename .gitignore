@@ -5,3 +5,4 @@ secrets*.h
 __pycache__/
 .DS_Store
 .devcontainer
+logs/
