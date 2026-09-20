@@ -115,7 +115,8 @@ bool Forecast::fetch(const char* unit, bool toScene) {
                  "&longitude=" + _lon + "&hourly=temperature_2m&temperature_unit=" +
                  (u == 'f' ? "fahrenheit" : "celsius") +
                  "&forecast_days=2&timeformat=unixtime&timezone=auto";
-    Serial.printf("[%s] fetching forecast...\n", TAG);
+    Serial.printf("[%s] fetching forecast (heap=%u max-alloc=%u)...\n", TAG,
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 
     bool ok = false;
     WiFiClientSecure tls;
@@ -204,26 +205,37 @@ bool Forecast::fetch(const char* unit, bool toScene) {
     fs.templateText.size = 6;
 
     uint8_t frame[128];
-    size_t len = Glance::encodeForecastCommand(frame, sizeof(frame), &fs);
+    size_t len = Glance::encodeForecastCommand(frame, sizeof(frame), &fs, FORECAST_SLOT);
     if (len == 0) {
         Serial.printf("[%s] forecast encode failed\n", TAG);
         _fetching = false;
         return false;
     }
-    Serial.printf("[%s] 24h forecast: %ld..%ld °%s (%s char, slot 1)\n", TAG, (long)mn,
-                  (long)mx, u == 'f' ? "F" : "C", toScene ? "scene" : "data");
+    Serial.printf("[%s] 24h forecast: %ld..%ld °%s (%s char, slot %u)\n", TAG, (long)mn,
+                  (long)mx, u == 'f' ? "F" : "C", toScene ? "scene" : "data",
+                  (unsigned)FORECAST_SLOT);
     ok = toScene ? _glance.sendSceneCommand(frame, len) : _glance.sendCommand(frame, len);
     if (ok && !toScene) {
-        // Show the ring, then return to the watchface (see loop()).
-        _hideAtMs = millis() + FORECAST_DISPLAY_MS;
-        Serial.printf("[%s] forecast sent - showing for %us\n", TAG,
-                      (unsigned)(FORECAST_DISPLAY_MS / 1000));
+        if (FORECAST_DISPLAY_MS > 0) {
+            // Show the ring, then delete the scene (see loop()).
+            _hideAtMs = millis() + FORECAST_DISPLAY_MS;
+            Serial.printf("[%s] forecast sent - showing for %us\n", TAG,
+                          (unsigned)(FORECAST_DISPLAY_MS / 1000));
+        } else {
+            Serial.printf("[%s] forecast sent - stays in the carousel\n", TAG);
+        }
     }
     if (!ok) {
         Serial.printf("[%s] forecast NOT accepted%s\n", TAG,
                       toScene ? " (scene char len limit - use 'wx')"
                               : " (check connection)");
+        if (!toScene && WiFi.status() == WL_CONNECTED && !_glance.isConnected()) {
+            // Clock not up yet (boot): retry soon instead of waiting 30 min.
+            _nextFetchMs = millis() + 60000;
+        }
     }
     _fetching = false;
+    Serial.printf("[%s] fetch done (ok=%d heap=%u max-alloc=%u)\n", TAG, ok ? 1 : 0,
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
     return ok;
 }

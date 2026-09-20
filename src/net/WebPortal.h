@@ -27,8 +27,9 @@ public:
 
     void begin() {
         // Load the stored mDNS host name (multi-device setups name each
-        // bridge differently: `mdns <name>` over serial).
-        _prefs.begin("portal", true);
+        // bridge differently: `mdns <name>` over serial). Writable open so
+        // a fresh NVS gets the namespace created silently.
+        _prefs.begin("portal", false);
         _host = _prefs.getString("host", "glancebridge");
         _prefs.end();
     }
@@ -211,6 +212,8 @@ private:
         body += row(dot(_net.timeValid()), "NTP time", _net.timeValid() ? "synced" : "no");
         body += row(dot(_bridge.phoneConnected()), "Phone",
                     _bridge.phoneConnected() ? "connected" : "no");
+        String fw = _glance.firmwareVersion();
+        body += row("", "Firmware", fw.length() ? fw : String("unknown"));
         body += "</div>";
 
         String weather = _forecast.hasLocation()
@@ -334,6 +337,21 @@ private:
 
     void handleControl() {
         String msg;
+        // Brightness comes as a POST form; ops are GET links.
+        if (_server.method() == HTTP_POST && _server.hasArg("brightness")) {
+            long b = _server.arg("brightness").toInt();
+            if (b >= 0 && b <= 255) {
+                Settings s = GlanceClient::completeSettings(_glance.lastSettings());
+                s.displayBrightness = (int)b;
+                bool ok = _glance.writeSettings(&s);
+                msg = ok ? ("Brightness " + String((int)b)) : String("Write failed");
+            } else {
+                msg = "Invalid brightness";
+            }
+            _server.sendHeader("Location", "/control?done=" + msg);
+            _server.send(302);
+            return;
+        }
         if (_server.hasArg("op")) {
             String op = _server.arg("op");
             if (op == "prev") {
@@ -348,6 +366,12 @@ private:
             } else if (op == "calok") {
                 const uint8_t c = Glance::Cmd::ConfirmCalibration;
                 msg = _glance.sendCommand(&c, 1) ? "Calibration confirmed" : "Failed";
+            } else if (op == "night-on" || op == "night-off") {
+                Settings s = GlanceClient::completeSettings(_glance.lastSettings());
+                s.nightModeEnabled = (op == "night-on");
+                bool ok = _glance.writeSettings(&s);
+                msg = ok ? String("Night mode ") + (s.nightModeEnabled ? "on" : "off")
+                         : String("Write failed");
             } else if (op == "clear") {
                 msg = _glance.sendCommand(Glance::Cmd::ScenesClear,
                                           Glance::ScenePriority::BandSystem)
@@ -369,6 +393,24 @@ private:
         body += "<a class=btn href='/control?op=prev'>&#9664;&nbsp; Previous face</a>"
                 "<a class=btn href='/control?op=next'>Next face &nbsp;&#9654;</a>"
                 "</div>";
+        // Settings (read-modify-write; values reflect the last settings read).
+        const Settings& ls = _glance.lastSettings();
+        int brightness = ls.has_displayBrightness ? ls.displayBrightness : 128;
+        body += "<div class=card><h3>Brightness</h3>"
+                "<p class=note>current: " + String(brightness) + "</p>"
+                "<form method=POST action=/control>"
+                "<input type=range name=brightness min=0 max=255 value=" +
+                String(brightness) + " style='width:100%'>"
+                "<button class='btn acc' style='width:100%'>Apply</button>"
+                "</form></div>";
+        bool night = ls.has_nightModeEnabled ? ls.nightModeEnabled : true;
+        body += "<div class=card><h3>Night mode</h3><p>";
+        body += ls.has_nightModeEnabled ? (night ? "on" : "off") : "unknown";
+        body += "</p><a class=btn href='/control?op=night-";
+        body += night ? "off'>Turn off" : "on'>Turn on";
+        body += "</a><a class=btn href='/control?op=";
+        body += night ? "night-on'>Turn on" : "night-off'>Turn off";
+        body += "</a></div>";
         body += "<div class=card><h3>Hands calibration</h3>"
                 "<a class=btn href='/control?op=calib'>Start calibration</a>"
                 "<a class=btn href='/control?op=calok'>Confirm calibration</a>"

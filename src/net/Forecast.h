@@ -57,11 +57,18 @@ private:
     // Current local wall time encoded as epoch (what the clock expects).
     static int64_t wallEpochNow();
 
-    // Carousel slot the forecast scene is pushed to (frame byte b).
-    static constexpr uint8_t FORECAST_SLOT = 1;
-    // Display duration before deleting the scene (ScenesDelete cmd 33),
-    // returning the clock to its native watchface.
-    static constexpr uint32_t FORECAST_DISPLAY_MS = 15000;
+    // Carousel slot the forecast scene is pushed to (frame byte b). The
+    // FACTORY carousel layout (clock fw 1.5) is: slot 0 = empty (renders
+    // dim), slot 1 = the built-in digital watchface. Community clients use
+    // slot 1 for temperature because they install their own digital-time
+    // scene at slot 0 first - on this clock that would OVERWRITE the
+    // factory watchface. Slot 2 leaves the factory slots untouched.
+    static constexpr uint8_t FORECAST_SLOT = 2;
+    // Display duration before deleting the scene (ScenesDelete cmd 33).
+    // 0 = keep the scene in the carousel (the clock may return to the
+    // watchface on its own; was previously needed because the forecast
+    // overwrote the factory watchface slot).
+    static constexpr uint32_t FORECAST_DISPLAY_MS = 0;
 
     GlanceClient& _glance;
     Preferences _prefs;

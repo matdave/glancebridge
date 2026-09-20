@@ -150,7 +150,8 @@ private:
         Serial.println("  pair               connect + pair (press clock's pairing button first)");
         Serial.println("  notify <text>      show a notification on the clock");
         Serial.println("  stop|start         scene carousel: previous/next face (cmds 30/31)");
-        Serial.println("  face               (re)install the digital watchface as carousel slot 0");
+        Serial.println("  face [slot] [mode] custom scene probe (mode 8 = watchface,");
+        Serial.println("                     renders blank on firmware 1.5)");
         Serial.println("  clear              clear all scenes");
         Serial.println("  bonds              clear pairings stored in the clock");
         Serial.println("  night on|off       night mode (settings write)");
@@ -166,6 +167,9 @@ private:
         Serial.println("  time               show the ESP32's local time");
         Serial.println("  settime ...        set local time: settime YYYY-MM-DD HH:MM:SS");
         Serial.println("  chronos on|off     start the Chronos peripheral / pause the relay");
+        Serial.println("  alarms             list the alarms set in the Chronos app");
+        Serial.println("  alarmpush          push the Chronos alarms to the clock");
+        Serial.println("  call <name>        fake an incoming call notice (test)");
         Serial.println("  wifi <ssid> <pass> connect to WiFi and sync time via NTP");
         Serial.println("  wifioff            clear stored WiFi credentials");
         Serial.println("  tz [posix]         show/set timezone, e.g. tz EST5EDT,M3.2.0,M11.1.0");
@@ -177,43 +181,6 @@ private:
         Serial.println("  raws <hex>         write raw bytes to the scene characteristic");
         Serial.println("  help               this list");
         Serial.println();
-    }
-
-    // Full settings message for a settings write: starts from the clock's
-    // last known values (falls back to safe defaults for fields the clock
-    // has not published), preserves DND/silent schedules when known, and
-    // sets every has_* flag so the write replaces nothing accidentally.
-    static Settings completeSettings(const Settings& src) {
-        Settings s = Settings_init_default;
-        s.has_nightModeEnabled = true;
-        s.nightModeEnabled = src.has_nightModeEnabled ? src.nightModeEnabled : true;
-        s.has_permanentDND = true;
-        s.permanentDND = src.has_permanentDND && src.permanentDND;
-        s.has_permanentMute = true;
-        s.permanentMute = src.has_permanentMute && src.permanentMute;
-        s.has_dateFormat = true;
-        s.dateFormat = src.has_dateFormat ? src.dateFormat
-                                          : Settings_DateFormat_DateDisabled;
-        s.has_pointsAlwaysEnabled = true;
-        s.pointsAlwaysEnabled = src.has_pointsAlwaysEnabled && src.pointsAlwaysEnabled;
-        s.has_displayBrightness = true;
-        s.displayBrightness = src.has_displayBrightness ? src.displayBrightness : 128;
-        s.has_timeModeEnable = true;
-        s.timeModeEnable = src.has_timeModeEnable ? src.timeModeEnable : true;
-        s.has_timeFormat12 = true;
-        s.timeFormat12 = src.has_timeFormat12 && src.timeFormat12;
-        s.has_mgrUserActivityTimeout = true;
-        s.mgrUserActivityTimeout =
-            src.has_mgrUserActivityTimeout ? src.mgrUserActivityTimeout : 600;
-        if (src.has_dnd) {
-            s.has_dnd = true;
-            s.dnd = src.dnd;
-        }
-        if (src.has_silent) {
-            s.has_silent = true;
-            s.silent = src.silent;
-        }
-        return s;
     }
 
     void handlePair() {
@@ -295,19 +262,26 @@ private:
             const uint8_t c = Glance::Cmd::ConfirmCalibration;  // single byte
             _client.sendCommand(&c, 1);
         } else if (cmd == "face") {
-            // Re-install the digital watchface as carousel slot 0 (auto-
-            // done once per boot after connect).
-            _client.installWatchfaceScene();
+            // (Re)install the digital watchface scene: [0, 0, mode, slot].
+            // Mode 8 = built-in watchface (per the C# client), but it
+            // renders BLANK on clock firmware 1.5 — likely a 1.6+ feature.
+            // Optional args let you probe: face [slot] [mode].
+            int slot = 0;
+            int mode = 8;
+            int n = sscanf(arg.c_str(), "%d %d", &slot, &mode);
+            if (n >= 1) {
+                _client.installWatchfaceScene((uint8_t)slot, (uint8_t)mode);
+            } else {
+                _client.installWatchfaceScene();
+            }
         } else if (cmd == "night" && (arg == "on" || arg == "off")) {
             // Night mode via settings write (the 40/41 command frames are
             // from the cloud era and rejected by this firmware).
-            Settings s = completeSettings(_client.lastSettings());
+            Settings s = GlanceClient::completeSettings(_client.lastSettings());
             s.nightModeEnabled = (arg == "on");
             Serial.printf("[console] writing settings with nightMode=%d\n",
                           s.nightModeEnabled ? 1 : 0);
-            if (_client.writeSettings(&s)) {
-                Serial.println("[console] settings written - now run 'settings'");
-            }
+            _client.writeSettings(&s);
         } else if (cmd == "night") {
             Serial.println("[console] usage: night on|off");
         } else if (cmd == "gatt") {
@@ -322,7 +296,7 @@ private:
             // Read-modify-write settings write (replaces everything on the
             // clock, based on the last decoded values). Optional brightness
             // makes the change visible; 'settings' afterwards re-reads.
-            Settings s = completeSettings(_client.lastSettings());
+            Settings s = GlanceClient::completeSettings(_client.lastSettings());
             bool valid = true;
             for (const char* p = arg.c_str(); *p; p++) {
                 if (*p < '0' || *p > '9') {
@@ -343,9 +317,7 @@ private:
                           s.nightModeEnabled ? 1 : 0, s.permanentDND ? 1 : 0,
                           s.permanentMute ? 1 : 0, s.timeFormat12 ? 1 : 0,
                           s.displayBrightness);
-            if (_client.writeSettings(&s)) {
-                Serial.println("[console] settings written - now run 'settings'");
-            }
+            _client.writeSettings(&s);
         } else if (cmd == "batt") {
             _client.readBattery();
         } else if (cmd == "geo") {
@@ -420,6 +392,18 @@ private:
         } else if (cmd == "chronos" && arg == "off") {
             // pauses the relay only; the peripheral keeps running
             _bridge.setRelay(false);
+        } else if (cmd == "alarms") {
+            _bridge.printAlarms();
+        } else if (cmd == "alarmpush") {
+            _bridge.pushAlarms();
+        } else if (cmd == "call") {
+            if (arg.length() == 0) {
+                Serial.println("[console] usage: call <name>");
+            } else {
+                // phone icon (byte 129) + name, like the ringer path
+                String text = String((char)129) + " " + arg;
+                _client.sendNotice(text.c_str());
+            }
         } else if (cmd == "forget") {
             _client.forget();
         } else if (cmd == "disc") {
@@ -444,6 +428,10 @@ private:
             Serial.printf("[console] wifi=%d(%s) ntp=%d heap=%u\n", (int)WiFi.status(),
                           _net.isConnected() ? "up" : "down", _net.timeValid() ? 1 : 0,
                           (unsigned)ESP.getFreeHeap());
+            if (_client.firmwareVersion().length()) {
+                Serial.printf("[console] clock firmware: %s\n",
+                              _client.firmwareVersion().c_str());
+            }
             if (_client.lastBattery() >= 0) {
                 Serial.printf("[console] clock battery (last): %d%%\n",
                               _client.lastBattery());

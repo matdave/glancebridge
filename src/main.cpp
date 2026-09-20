@@ -48,6 +48,7 @@ void setup() {
 }
 
 static bool timeWasValid = false;
+static uint32_t _nextHeapLogMs = 0;
 
 void loop() {
     net.loop();
@@ -65,6 +66,13 @@ void loop() {
     forecast.loop();
     portal.handle();  // web PIN entry (headless pairing)
     console.poll();
+    // Heap heartbeat: leaks (e.g. per-TLS-session in forecast fetches) show
+    // as a declining series, and the values correlate with crashes.
+    if ((int32_t)(millis() - _nextHeapLogMs) >= 0) {
+        _nextHeapLogMs = millis() + 60000;
+        Serial.printf("[sys] heap=%u max-alloc=%u\n", (unsigned)ESP.getFreeHeap(),
+                      (unsigned)ESP.getMaxAllocHeap());
+    }
     delay(20);
 }
 
