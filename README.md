@@ -29,7 +29,9 @@ a vendor ATT error (0x81).
 [Hypfer/glance-clock-assets/firmwares](https://github.com/Hypfer/glance-clock-assets/tree/master/firmwares)
 (the zip name starts with the hw rev, e.g. `0503...` = hw 5.3); flash via
 nRF Connect DFU. After a DFU, re-pair once (the update wipes the clock's
-bond store).
+bond store). **Warning: a clock factory reset also reverts the firmware
+back to the factory version** — after a reset the DFU update must be
+re-flashed.
 
 ## Status / roadmap
 
@@ -46,8 +48,12 @@ bond store).
 - [x] Settings read/write (command 5): read-modify-write; the clock publishes
       the new settings back into the data characteristic after a write
 - [x] **Forecast ring**: 24h temperatures from Open-Meteo (no API key),
-      `ForecastScene` in carousel slot 1; shows 15 s then auto-deletes so the
-      clock returns to its native watchface; auto-refresh every 30 min
+      `ForecastScene` in carousel slot 2 (leaves the factory watchface at
+      slot 1 alone); the ring stays in the carousel; auto-refresh every
+      30 min.
+      Note: the factory carousel is slot 0 = empty (renders dim) and
+      slot 1 = the built-in digital watchface — scene pushes to slot 1
+      overwrite the clock's own watchface.
 - [x] **Web portal**: status, headless PIN entry, weather config, carousel
       and calibration controls (see below)
 - [ ] Chronos alarms -> `Alarms` protobuf

@@ -24,13 +24,34 @@ classic ESP32, clock = `GlanceClock_3B e3:75:8d:6f:22:c8`, bonded):**
   Timestamp = API's unixtime value directly (timeformat=unixtime +
   timezone=auto returns localtime-as-epoch, exactly what the proto wants).
   Auto-refetch every 30 min. **cmd 7 accepted on firmware 1.5** (was 0x81
-  on factory 0.8.56). Unit persisted (default F); auto-hide after 15 s →
+  on factory 0.8.56 — **and a CLOCK FACTORY RESET ROLLS THE FIRMWARE BACK
+  to 0.8.56 (verified 2026-09-19: after the user's reset, scenes were
+  0x81-rejected again and gatt showed 0x2a26="0.8.56"; the 1.5.10 DFU had
+  to be re-flashed). Avoid factory resets; prefer re-pairing.** Unit
+  persisted (default F); auto-hide after 15 s →
   single-byte ScenesStart (31, "next face") advances past the ring back to
-  the native watchface: auto-hide DELETES the scene (cmd 33 ScenesDelete,
-  [33,0,0,1] per C# DeleteSceneCommand). User feedback drove this: 30/31
-  are carousel-nav only (C# advances its weather carousel with 31), empty
+  the native watchface. **FACTORY CAROUSEL LAYOUT (clock fw 1.5, user
+  discovery 2026-09-19): slot 0 = empty (renders dim), slot 1 = the
+  built-in digital watchface!** The community slot scheme (temp=slot 1)
+  assumes they installed their own digital-time scene at slot 0 first —
+  on this clock forecast to slot 1 OVERWROTE the factory watchface, and
+  deleting slot 1 removed it entirely (the "dim" mystery). Forecast now
+  goes to SLOT 2. BUG FIXED: the slot byte was HARDCODED as 1 inside
+  GlanceCore::encodeForecastCommand (the FORECAST_SLOT constant only fed
+  the delete frame + a stale log string) - the first slot-2 build still
+  wrote slot 1 and got 0x81-rejected once the user's clock reset restored
+  the protected factory watchface. The encoder now takes the slot as a
+  parameter (default 2, native test updated). **FORECAST CLOSED
+  (user-validated 2026-09-20): slot 2 works as expected with auto-hide
+  DISABLED (FORECAST_DISPLAY_MS = 0) — the ring stays in the carousel and
+  the factory watchface is untouched. The auto-hide delete code path is
+  retained for a future timed-removal option. User feedback drove the
+  design: 30/31 are carousel-nav only (C# advances its weather carousel
+  with 31), empty
   slots and the mode-8 watchface CustomScene ([0,0,8,slot], C#
-  DigitalTimeSceneCommand) render DIM on firmware 1.5 - so no auto slot-0
+  DigitalTimeSceneCommand, byte-identical frame) render BLANK on firmware
+  1.5 - likely a 1.6+ feature; `face [slot] [mode]` now takes args for
+  probing other display modes. So no auto slot-0
   install (manual `face` command kept for experiments).
 - ChronosBridge: phone time sync + notification relay — built, starts at
   boot; status shows phone=0 until the Chronos app test is actually run
@@ -41,6 +62,20 @@ classic ESP32, clock = `GlanceClock_3B e3:75:8d:6f:22:c8`, bonded):**
   reboot; recurred twice when phone+clock connected together. Mitigation
   applied: boot stagger — first clock reconnect delayed 5s so the phone
   link settles first.
+- **Alarms + calls (BUILT, untested — Phase 3)**: cmd 4, `[4,0,0,0]` +
+  Alarms proto via `Glance::encodeAlarmCommand` (native-tested 10/10).
+  ChronosBridge: `pushAlarms()` (auto-runs on CF_ALARM config changes),
+  `printAlarms()`; repeat-bitfield→Days mapping (Chronos bit0=Mon..bit6=Sun,
+  0x7F→All, 0x80/0→None, multi-day→All approximation). Console: `alarms`,
+  `alarmpush`. ALARM PRIO IS A GUESS (0) — user-validated anyway: alarms
+  DISPLAY correctly on 1.5.10. Originally silent: we sent
+  Sound_NoneSound (the literal mute) — fixed to Sound_Waves (proto
+  comment: "Also known as Alarm", the classic alarm tone); per-alarm
+  sound choice is a possible future knob.
+  Incoming call: Chronos ringer callback → Notice with the phone icon
+  (raw byte 129) + caller name — there is NO CallScene payload in the
+  proto (cmd 6 remains an undocumented experiment). Console `call <name>`
+  fakes one. The notice self-dismisses; nothing on call end.
 - **CLOCK drops its bond when the central disconnects abnormally**
   (firmware 1.5): ESP32-side bond persists (boot log
   `ESP32 bond for clock: present`), the clock KEEPS the bond across its own
@@ -51,7 +86,10 @@ classic ESP32, clock = `GlanceClock_3B e3:75:8d:6f:22:c8`, bonded):**
   command = clean disconnect diagnostic: if a clean disconnect+reconnect
   does NOT demand a PIN, the trigger is specifically the abnormal link
   loss. Unfixable from our side (clock security policy requires the PIN
-  for re-pairing). **Web portal (src/net/WebPortal.h, renamed from
+  for re-pairing). writeSettings now auto-reads back after a write
+  (3x300ms poll of the published settings) so _lastSettings — and every
+  UI built on it — reflects the real clock state without a manual
+  'settings' read. **Web portal (src/net/WebPortal.h, renamed from
   PinPortal)** at http://glancebridge.local (mDNS) / device IP:
   / status (auto-refresh), /enter PIN form (NO refresh so typing is safe;
   the pending redirect MUST use meta content='0; url=/enter' - an unquoted
@@ -80,7 +118,10 @@ classic ESP32, clock = `GlanceClock_3B e3:75:8d:6f:22:c8`, bonded):**
   = BLE_ERR_CONN_ESTABLISHMENT — clock not ready yet).
   Chronos note: ChronosESP32 inherits ESP32Time and applies the phone time
   via settimeofday BEFORE our CF_TIME callback fires.
-- ChronosBridge: phone via Chronos app → notification relay (app: title →
+- ChronosBridge: phone via Chronos app → notification relay (app + message
+  body; the library's splitTitle puts real content in `message` and the app
+  name in `title` when the text has no early colon — title-first logic used
+  to relay the placeholder "Message: Message" relic),
   Notice) + battery to the phone. Starts at boot.
 - **Phone time skew ROOT-CAUSED + FIXED 2026-09-19**: the app's packet is
   CORRECT (raw dump decoded: `AB 00 0B FF 93 80 00 07 EA 09 13 <hh> <mm>
@@ -256,13 +297,80 @@ partition at 1.31MB; we were at 97% full). **Do not delete this file.**
    (Chronos Alarm struct → Alarms protobuf), CallScene from ringer callback.
    All protobufs already generated in lib/GlanceCore. The C#
    GlanceProtocol.cs has validated ring builders to port (NumbersRingCommand
-   for rain/wind/humidity rings).
+   for rain/wind/humidity rings). BUILT (untested): web brightness slider +
+   night-mode toggle (both = settings RMW via GlanceClient::completeSettings,
+   hoisted from Console for the portal), firmware rev on the web status page
+   (read at connect from 0x180A/0x2A26, also in console `status`).
+
+## 4a. Future investigation: clock battery drain while connected
+
+User observation (2026-09-20): the clock's battery drains faster than
+expected while bridged. What we actually do to the clock: one persistent
+BLE connection, a battery-notify subscription (no polling), rare writes
+(forecast 2x/hour max, settings RMW + read-back, CTS nudge on time
+change). The dominant suspect is the CONNECTION ITSELF: the clock's
+nRF52 wakes for every connection event, and the default interval is
+likely short (peripheral-dictated or ~30ms-ish from pairing).
+
+Levers to try (in order):
+1. **Longer connection interval** — the central can request it after
+   connect: `NimBLEClient::updateConnParams(min, max, latency, timeout)`
+   (verified present in NimBLE 2.5.1). Try min/max ~300-500 ms with
+   latency 2-4 + a safe supervision timeout. Watch: notices still arrive
+   (they go over the connection), battery notify still arrives.
+2. **Measure first**: 24 h battery % with the bridge connected vs clock
+   idle-disconnected, to quantify the connection's share.
+3. **Intermittent connection** (bigger change): connect only to push
+   (forecast/notice/alarm) and disconnect after N s idle — the clock
+   re-polls CTS on every connect anyway, so time stays correct; battery
+   notify would be lost while disconnected.
+4. Check whether the clock firmware sleeps less with multiple bonds/
+   services active (8e400001 subscription adds CCCD work; `sub off` when
+   unused).
+
+Note: heap telemetry from 2026-09-20 sits in main loop + Forecast fetch
+for the crash hunt; unrelated to this but same session.
+
+## 4b. Future investigation: WiFi setup AP (headless provisioning)
+
+User request (2026-09-20): when the ESP32 can't connect to WiFi (no
+credentials, or repeated auth failures), spin up its own WiFi network so
+a phone can join it and configure the real credentials — no laptop.
+
+Sketch:
+1. Trigger: WiFi not connected ~3 min after boot, either because
+   credentials are empty or after N failed attempts (NetTime tracks the
+   status transitions already).
+2. SoftAP: `WiFi.mode(WIFI_AP_STA)` + SSID `GlanceBridge-Setup-XXXX`
+   (XXXX = last 2 MAC bytes, so multiple bridges are distinguishable),
+   open network, keep STA attempts going in the background.
+3. Web portal already exists — extend `WebPortal::handle()` with an AP
+   branch (it currently no-ops unless WL_CONNECTED): serve on the SoftAP
+   interface (192.168.4.1), add a `/wifi` page listing
+   `WiFi.scanNetworks()` results with a password form posting to
+   NetTime::setCredentials, then drop the AP and reconnect.
+4. DNSServer (captive portal: point every DNS query at us) so phones pop
+   the portal automatically; mDNS is unreliable in AP mode — advertise
+   the raw 192.168.4.1 on the clock display via a Notice if useful.
+5. Caveats: AP+STA+BLE coexistence on the classic ESP32 degrades the
+   clock link during setup (acceptable); an open setup portal is only a
+   risk while provisioning (it appears only when WiFi is down) — still,
+   consider only enabling it when credentials are absent or failing, not
+   during normal operation.
 
 ## 5. Handy facts
 
 - NimBLE callbacks run on the host task: NEVER call blocking BLE ops
   (secureConnection, readValue, writeValue) inside them. Pairing flow does
   everything in main task after connect() returns (see GlanceClient).
+  VIOLATED TWICE (2026-09-19, both fixed): CF_ALARM → pushAlarms (blocking
+  write) → "Stack canary watchpoint triggered (nimble_host)" crash when
+  setting an alarm in the app; phone-time policy hook → esp_sntp_restart
+  (lwIP) → "assert failed: udp_new_ip_type ... Required to lock TCPIP core"
+  at boot. ChronosBridge callbacks now only set pending flags
+  (_phoneTimePending/_alarmPushPending/_noticePending + fixed char buffer);
+  loop() drains them on the main task. The notification relay was also
+  moved off the host task (it had been lucky, not correct).
 - `writeValue` with response blocks until ACK or the host's hard-coded 30s
   GATT timeout (`BLE_GATTC_UNRESPONSIVE_TIMEOUT_MS`), which then drops the
   connection. Every sendCommand logs `sending cmd 0xNN` first for visibility.
