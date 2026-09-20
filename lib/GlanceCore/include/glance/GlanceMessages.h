@@ -45,8 +45,20 @@ size_t encodeSettings(uint8_t* out, size_t cap, const Settings* s);
 // maxColor/minColor (RGB), values (24x Int16LE) and templateText.
 size_t encodeForecastScene(uint8_t* out, size_t cap, const ForecastScene* fs);
 
-// Encode a full forecast command: header [7, prio=16, hours=24, slot=1].
-// Frame layout per the HA integration / Glance web app.
-size_t encodeForecastCommand(uint8_t* out, size_t cap, const ForecastScene* fs);
+// Encode a full forecast command: header [7, prio=16, hours=24, slot] +
+// ForecastScene payload (frame layout per the HA integration / web app).
+// Default slot 2: on clock fw 1.5 the factory carousel has the built-in
+// digital watchface at slot 1 (protected/overwritten otherwise) and slot 0
+// renders dim. Callers that manage their own slot layout can override.
+size_t encodeForecastCommand(uint8_t* out, size_t cap, const ForecastScene* fs,
+                             uint8_t slot = 2);
+
+// Encode an Alarms message (payload only). Callers fill alarm[i] entries
+// (enabled, days as Glance Days enum, time.hours/minutes, sound) and
+// alarm_count.
+size_t encodeAlarms(uint8_t* out, size_t cap, const Alarms* a);
+
+// Encode a full alarm command: header [4, prio=0, 0, 0] + Alarms payload.
+size_t encodeAlarmCommand(uint8_t* out, size_t cap, const Alarms* a);
 
 }  // namespace Glance

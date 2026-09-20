@@ -91,14 +91,34 @@ size_t encodeForecastScene(uint8_t* out, size_t cap, const ForecastScene* fs) {
     return stream.bytes_written;
 }
 
-size_t encodeForecastCommand(uint8_t* out, size_t cap, const ForecastScene* fs) {
+size_t encodeForecastCommand(uint8_t* out, size_t cap, const ForecastScene* fs, uint8_t slot) {
     uint8_t payload[96];
     size_t payloadLen = encodeForecastScene(payload, sizeof(payload), fs);
     if (payloadLen == 0) {
         return 0;
     }
-    // [7, 16, 24, 1]: SaveForecastScene, medium priority, 24 hours, slot 1.
-    return makeCommand(out, cap, Cmd::SaveForecastScene, ScenePriority::BandMedium, 24, 1,
+    // [7, 16, 24, slot]: SaveForecastScene, medium priority, 24 hours.
+    return makeCommand(out, cap, Cmd::SaveForecastScene, ScenePriority::BandMedium, 24, slot,
                        payload, payloadLen);
 }
+size_t encodeAlarms(uint8_t* out, size_t cap, const Alarms* a) {
+    if (out == nullptr || cap == 0 || a == nullptr) {
+        return 0;
+    }
+    pb_ostream_t stream = pb_ostream_from_buffer(out, cap);
+    if (!pb_encode(&stream, Alarms_fields, a)) {
+        return 0;
+    }
+    return stream.bytes_written;
+}
+
+size_t encodeAlarmCommand(uint8_t* out, size_t cap, const Alarms* a) {
+    uint8_t payload[192];
+    size_t payloadLen = encodeAlarms(payload, sizeof(payload), a);
+    if (payloadLen == 0) {
+        return 0;
+    }
+    return makeCommand(out, cap, Cmd::Alarm, 0, 0, 0, payload, payloadLen);
+}
+
 }  // namespace Glance

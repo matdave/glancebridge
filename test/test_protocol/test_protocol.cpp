@@ -108,9 +108,52 @@ void test_settings_encode_decode_roundtrip() {
     TEST_ASSERT_EQUAL_INT32(Settings_DateFormat_DateDisabled, out.dateFormat);
 }
 
+void test_alarm_command_frame() {
+    // Header must be [4, 0, 0, 0] (Alarm command) + Alarms protobuf with
+    // two alarms: 07:30 Monday and 22:00 all days.
+    Alarms alarms = Alarms_init_default;
+    alarms.alarm_count = 2;
+
+    alarms.alarm[0].has_enabled = true;
+    alarms.alarm[0].enabled = true;
+    alarms.alarm[0].has_days = true;
+    alarms.alarm[0].days = Days_Monday;
+    alarms.alarm[0].time.hours = 7;
+    alarms.alarm[0].time.minutes = 30;
+    alarms.alarm[0].sound = Sound_NoneSound;
+
+    alarms.alarm[1].has_enabled = true;
+    alarms.alarm[1].enabled = true;
+    alarms.alarm[1].has_days = true;
+    alarms.alarm[1].days = Days_All;
+    alarms.alarm[1].time.hours = 22;
+    alarms.alarm[1].time.minutes = 0;
+    alarms.alarm[1].sound = Sound_NoneSound;
+
+    uint8_t buf[128];
+    size_t len = Glance::encodeAlarmCommand(buf, sizeof(buf), &alarms);
+    TEST_ASSERT_TRUE(len > 4);
+    TEST_ASSERT_EQUAL_HEX8(0x04, buf[0]);  // Alarm command
+    TEST_ASSERT_EQUAL_HEX8(0x00, buf[1]);  // prio 0
+    TEST_ASSERT_EQUAL_HEX8(0x00, buf[2]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, buf[3]);
+
+    Alarms out;
+    pb_istream_t stream = pb_istream_from_buffer(buf + 4, len - 4);
+    TEST_ASSERT_TRUE(pb_decode(&stream, Alarms_fields, &out));
+    TEST_ASSERT_EQUAL_UINT(2, out.alarm_count);
+    TEST_ASSERT_TRUE(out.alarm[0].enabled);
+    TEST_ASSERT_EQUAL_INT32(Days_Monday, out.alarm[0].days);
+    TEST_ASSERT_EQUAL_INT32(7, out.alarm[0].time.hours);
+    TEST_ASSERT_EQUAL_INT32(30, out.alarm[0].time.minutes);
+    TEST_ASSERT_EQUAL_INT32(Days_All, out.alarm[1].days);
+    TEST_ASSERT_EQUAL_INT32(22, out.alarm[1].time.hours);
+}
+
 void test_forecast_command_frame() {
-    // Header must be [7, 16, 24, 1] (SaveForecastScene, medium prio, 24h,
-    // slot 1) per the HA integration / web app, followed by the protobuf.
+    // Header must be [7, 16, 24, slot] (SaveForecastScene, medium prio,
+    // 24 hours) per the HA integration / web app, followed by the protobuf.
+    // Default slot is 2 (factory watchface lives at slot 1 on clock fw 1.5).
     ForecastScene fs = ForecastScene_init_default;
     fs.timestamp = 1780000000LL;  // local wall time encoded as epoch
     fs.maxColor = 0xFF0000;
@@ -133,7 +176,7 @@ void test_forecast_command_frame() {
     TEST_ASSERT_EQUAL_HEX8(0x07, buf[0]);   // SaveForecastScene
     TEST_ASSERT_EQUAL_HEX8(0x10, buf[1]);   // priority 16
     TEST_ASSERT_EQUAL_HEX8(0x18, buf[2]);   // 24 hours
-    TEST_ASSERT_EQUAL_HEX8(0x01, buf[3]);   // slot 1
+    TEST_ASSERT_EQUAL_HEX8(0x02, buf[3]);   // slot 2 (factory watchface is slot 1)
     // Payload decodes back into the same scene.
     ForecastScene out;
     pb_istream_t stream = pb_istream_from_buffer(buf + 4, len - 4);

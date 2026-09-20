@@ -12,6 +12,7 @@ void test_make_command_rejects_small_buffer(void);
 void test_notify_text_truncates_to_max_size(void);
 void test_settings_encode_decode_roundtrip(void);
 void test_forecast_command_frame(void);
+void test_alarm_command_frame(void);
 
 int main(void) {
     UNITY_BEGIN();
@@ -24,5 +25,6 @@ int main(void) {
     RUN_TEST(test_notify_text_truncates_to_max_size);
     RUN_TEST(test_settings_encode_decode_roundtrip);
     RUN_TEST(test_forecast_command_frame);
+    RUN_TEST(test_alarm_command_frame);
     return UNITY_END();
 }
