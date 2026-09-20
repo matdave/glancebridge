@@ -251,11 +251,12 @@ bool GlanceClient::secureAndDiscover() {
     return true;
 }
 
-bool GlanceClient::installWatchfaceScene(uint8_t slot) {
-    // [0, 0, 8, slot]: CustomScene command, prio 0, display mode 8 =
-    // "built-in watchface", slot index. Frame layout per the C# client.
-    const uint8_t frame[] = {Glance::Cmd::CustomScene, 0, 8, slot};
-    Serial.printf("[%s] installing digital watchface scene (slot %u)\n", TAG, (unsigned)slot);
+bool GlanceClient::installWatchfaceScene(uint8_t slot, uint8_t mode) {
+    // [0, 0, mode, slot]: CustomScene command, prio 0, display mode,
+    // slot index. Frame layout per the C# client (mode 8 = watchface).
+    const uint8_t frame[] = {Glance::Cmd::CustomScene, 0, mode, slot};
+    Serial.printf("[%s] installing custom scene (slot %u, mode %u)\n", TAG,
+                  (unsigned)slot, (unsigned)mode);
     return sendCommand(frame, sizeof(frame));
 }
 
@@ -339,6 +340,15 @@ bool GlanceClient::discoverDataCharacteristic() {
     NimBLERemoteCharacteristic* scene =
         svc->getCharacteristic(NimBLEUUID("5075ffac-1e0e-11e7-93ae-92361f002671"));
     _sceneChar = (scene != nullptr && scene->canWrite()) ? scene : nullptr;
+    // Cache the firmware revision (0x180A/0x2A26) for status/web display.
+    NimBLERemoteService* diSvc = _client->getService(NimBLEUUID((uint16_t)0x180A));
+    NimBLERemoteCharacteristic* fw =
+        diSvc ? diSvc->getCharacteristic(NimBLEUUID((uint16_t)0x2A26)) : nullptr;
+    if (fw != nullptr && fw->canRead()) {
+        NimBLEAttValue v = fw->readValue();
+        _fwVersion = String(v.c_str());
+        Serial.printf("[%s] clock firmware: %s\n", TAG, _fwVersion.c_str());
+    }
     return true;
 }
 
@@ -353,55 +363,58 @@ void GlanceClient::handleNotify(uint8_t* data, size_t len) {
                   toHex(data, len).c_str());
 }
 
+// Read + strip + decode whatever the data characteristic holds (main task).
+// Envelopes seen in the wild: "Data\0" + protobuf, [5,0,0,0] + protobuf, or
+// a single 0x05 byte before the protobuf. (A raw protobuf can never start
+// with 0x05: that would be field 0.) On success _lastSettings is refreshed.
+bool GlanceClient::readPublishedSettings() {
+    if (_dataChar == nullptr) {
+        return false;
+    }
+    NimBLEAttValue v = _dataChar->readValue();
+    if (v.length() < 5) {
+        return false;
+    }
+    const uint8_t* p = (const uint8_t*)v.data();
+    size_t len = v.length();
+    if (memcmp(p, "Data", 4) == 0 && p[4] == 0x00) {
+        p += 5;
+        len -= 5;
+    } else if (p[0] == Glance::Cmd::Settings && p[1] == 0x00 && p[2] == 0x00 &&
+               p[3] == 0x00) {
+        p += 4;
+        len -= 4;
+    } else if (p[0] == Glance::Cmd::Settings) {
+        p += 1;
+        len -= 1;
+    }
+    if (len == 0) {
+        return false;
+    }
+    _settingsHex = toHex(p, len);
+    Serial.printf("[%s] settings read (%u bytes): %s\n", TAG, (unsigned)len,
+                  _settingsHex.c_str());
+    Settings settings;
+    if (Glance::decodeSettings(p, len, &settings)) {
+        _lastSettings = settings;
+        Serial.printf("[%s] settings: nightMode=%d brightness=%d 12h=%d\n", TAG,
+                      settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
+                      settings.timeFormat12 ? 1 : 0);
+        return true;
+    }
+    Serial.printf("[%s] settings decode failed\n", TAG);
+    return false;
+}
+
 bool GlanceClient::readSettings() {
     if (_dataChar == nullptr) {
         return false;
     }
-    // Read + strip + decode whatever the data characteristic holds. Envelopes
-    // seen in the wild: "Data\0" + protobuf, [5,0,0,0] + protobuf, or a
-    // single 0x05 byte before the protobuf. (A raw protobuf can never start
-    // with 0x05: that would be field 0.)
-    auto readPublished = [this]() -> bool {
-        NimBLEAttValue v = _dataChar->readValue();
-        if (v.length() < 5) {
-            return false;
-        }
-        const uint8_t* p = (const uint8_t*)v.data();
-        size_t len = v.length();
-        if (memcmp(p, "Data", 4) == 0 && p[4] == 0x00) {
-            p += 5;
-            len -= 5;
-        } else if (p[0] == Glance::Cmd::Settings && p[1] == 0x00 && p[2] == 0x00 &&
-                   p[3] == 0x00) {
-            p += 4;
-            len -= 4;
-        } else if (p[0] == Glance::Cmd::Settings) {
-            p += 1;
-            len -= 1;
-        }
-        if (len == 0) {
-            return false;
-        }
-        _settingsHex = toHex(p, len);
-        Serial.printf("[%s] settings read (%u bytes): %s\n", TAG, (unsigned)len,
-                      _settingsHex.c_str());
-        Settings settings;
-        if (Glance::decodeSettings(p, len, &settings)) {
-            _lastSettings = settings;
-            Serial.printf("[%s] settings: nightMode=%d brightness=%d 12h=%d\n", TAG,
-                          settings.nightModeEnabled ? 1 : 0, settings.displayBrightness,
-                          settings.timeFormat12 ? 1 : 0);
-            return true;
-        }
-        Serial.printf("[%s] settings decode failed\n", TAG);
-        return false;
-    };
-
     // HA integration flow: plain read first; if nothing is published, send
     // command 35 (UpdateAndRefresh) as a SINGLE byte - the 4-byte frame is
     // rejected with vendor ATT error 0x81, and sendCommand() falls back to a
     // no-response write which the clock accepts - then poll the read again.
-    if (readPublished()) {
+    if (readPublishedSettings()) {
         return true;
     }
     Serial.printf("[%s] nothing published; requesting refresh (single-byte cmd 35)\n", TAG);
@@ -412,7 +425,7 @@ bool GlanceClient::readSettings() {
     }
     for (int poll = 0; poll < 10; poll++) {
         delay(300);
-        if (readPublished()) {
+        if (readPublishedSettings()) {
             return true;
         }
     }
@@ -429,7 +442,21 @@ bool GlanceClient::writeSettings(const Settings* s) {
     }
     // HA-style settings write: [5,0,0,0] + complete Settings protobuf. This
     // replaces all settings on the clock - callers must send every field.
-    return sendCommand(Glance::Cmd::Settings, 0, 0, 0, payload, payloadLen);
+    if (!sendCommand(Glance::Cmd::Settings, 0, 0, 0, payload, payloadLen)) {
+        return false;
+    }
+    // After processing the write, the clock publishes the settings back
+    // into the data characteristic. Read them back so _lastSettings (and
+    // every UI built on it) reflects the real state - without this the
+    // portal/console bases RMW on guesses until someone runs 'settings'.
+    for (int poll = 0; poll < 3; poll++) {
+        delay(300);
+        if (readPublishedSettings()) {
+            return true;
+        }
+    }
+    Serial.printf("[%s] settings write sent but no read-back yet\n", TAG);
+    return true;
 }
 
 // ------------------------------------------------------------------ battery
@@ -483,6 +510,38 @@ void GlanceClient::subscribeBattery() {
 }
 
 // ----------------------------------------------------------------- commands
+
+Settings GlanceClient::completeSettings(const Settings& src) {
+    Settings s = Settings_init_default;
+    s.has_nightModeEnabled = true;
+    s.nightModeEnabled = src.has_nightModeEnabled ? src.nightModeEnabled : true;
+    s.has_permanentDND = true;
+    s.permanentDND = src.has_permanentDND && src.permanentDND;
+    s.has_permanentMute = true;
+    s.permanentMute = src.has_permanentMute && src.permanentMute;
+    s.has_dateFormat = true;
+    s.dateFormat = src.has_dateFormat ? src.dateFormat : Settings_DateFormat_DateDisabled;
+    s.has_pointsAlwaysEnabled = true;
+    s.pointsAlwaysEnabled = src.has_pointsAlwaysEnabled && src.pointsAlwaysEnabled;
+    s.has_displayBrightness = true;
+    s.displayBrightness = src.has_displayBrightness ? src.displayBrightness : 128;
+    s.has_timeModeEnable = true;
+    s.timeModeEnable = src.has_timeModeEnable ? src.timeModeEnable : true;
+    s.has_timeFormat12 = true;
+    s.timeFormat12 = src.has_timeFormat12 && src.timeFormat12;
+    s.has_mgrUserActivityTimeout = true;
+    s.mgrUserActivityTimeout =
+        src.has_mgrUserActivityTimeout ? src.mgrUserActivityTimeout : 600;
+    if (src.has_dnd) {
+        s.has_dnd = true;
+        s.dnd = src.dnd;
+    }
+    if (src.has_silent) {
+        s.has_silent = true;
+        s.silent = src.silent;
+    }
+    return s;
+}
 
 bool GlanceClient::sendSceneCommand(const uint8_t* data, size_t len) {
     if (!isConnected() || _sceneChar == nullptr) {

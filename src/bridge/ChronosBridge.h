@@ -34,12 +34,28 @@ public:
     // has already applied the time to the system clock).
     void onPhoneTime(std::function<void()> hook) { _onPhoneTime = std::move(hook); }
 
+    // Push the Chronos app's alarms to the clock as an Alarms protobuf
+    // (auto-runs on the main loop when the app changes an alarm).
+    void pushAlarms();
+    void printAlarms();
+
+    // Queue a notice for the main-loop relay (host-task safe: fixed buffer
+    // + flag, no blocking work in NimBLE callbacks).
+    void queueNotice(const String& text);
+
 private:
     void onNotification(const Notification& n);
+    void relayNotice(const String& text);
 
     GlanceClient& _glance;
     ChronosESP32 _watch{"GlanceBridge"};
     bool _started = false;
     bool _relay = true;
     std::function<void()> _onPhoneTime;
+
+    // Pending work from host-task callbacks, drained by loop().
+    volatile bool _phoneTimePending = false;
+    volatile bool _alarmPushPending = false;
+    volatile bool _noticePending = false;
+    char _noticeBuf[160] = {0};
 };

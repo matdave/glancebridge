@@ -55,11 +55,10 @@ public:
     // commands the firmware rejects on the Data characteristic (0x81).
     bool sendSceneCommand(const uint8_t* data, size_t len);
 
-    // Install the clock's own digital watchface as a carousel scene
-    // (CustomScene cmd 0, display mode 8 = built-in watchface). Gives the
-    // carousel a bright face to return to after scene pushes like the
-    // forecast ring (an empty slot renders dim).
-    bool installWatchfaceScene(uint8_t slot = 0);
+    // Install a CustomScene ([0, 0, mode, slot]; mode 8 = built-in
+    // watchface per the C# client). On clock firmware 1.5 the mode-8
+    // scene renders blank - the args allow probing other modes.
+    bool installWatchfaceScene(uint8_t slot = 0, uint8_t mode = 8);
     bool watchfaceInstalled() const { return _watchfaceInstalled; }
 
     // Convenience: notify with text (see GlanceMessages.h for option defaults).
@@ -74,6 +73,15 @@ public:
     // Last successfully decoded settings from the clock (defaults until the
     // first successful read). Base for read-modify-write settings changes.
     Settings lastSettings() const { return _lastSettings; }
+
+    // Clock firmware revision (Device Information 0x2A26, read once at
+    // connect; empty until connected).
+    String firmwareVersion() const { return _fwVersion; }
+
+    // Fill a complete Settings struct for a settings write: starts from the
+    // clock's last known values (safe defaults for unpublished fields),
+    // preserves DND/silent schedules when known, sets every has_* flag.
+    static Settings completeSettings(const Settings& src);
 
     // Write a complete Settings message ([5,0,0,0] + protobuf, the path the
     // HA integration uses for brightness/mode changes). Replaces ALL clock
@@ -134,6 +142,7 @@ private:
     void handleNotify(uint8_t* data, size_t len);
     void updateBattery(uint8_t pct);
     void subscribeBattery();
+    bool readPublishedSettings();  // read+strip+decode+cache (host: main task)
 
     NimBLEClient* _client = nullptr;
     NimBLERemoteCharacteristic* _dataChar = nullptr;
@@ -142,6 +151,7 @@ private:
     bool _pairingInProgress = false;  // true during deliberate pair() (PIN ok)
     bool _watchfaceInstalled = false;  // slot 0 installed this boot?
     int _battPercent = -1;
+    String _fwVersion;
     bool _connected = false;
     bool _authenticated = false;
     bool _scanning = false;
