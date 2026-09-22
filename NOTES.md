@@ -302,6 +302,48 @@ partition at 1.31MB; we were at 97% full). **Do not delete this file.**
    hoisted from Console for the portal), firmware rev on the web status page
    (read at connect from 0x180A/0x2A26, also in console `status`).
 
+## 4c. Crash hunt status (2026-09-20 log device-monitor-260920-183047)
+
+Two more panics captured (garbled UART, auto-reboot, self-recovers).
+LEAK RULED OUT: [sys] heap= stable at ~90KB over ~17h (90120-90248,
+max-alloc 49140 flat) across many forecast fetches. Pattern: both crashes
+followed a Gmail relay within ~a minute (marketing emails full of
+multi-byte UTF-8, U+034F runs visible in the log). Hardening applied:
+relayed notice text + ringer caller names are now sanitized to printable
+ASCII (matches the official client's EncodeClockText behavior; phone-icon
+byte 129 preserved in the ringer path). NOT YET DECODABLE: the user's IDE
+exception decoder needs firmware.elf on their machine — it is created by
+their normal `pio run -e adafruit_feather_esp32_v2 -t upload` (build
+happens first); it was missing because their local .pio/build had been
+cleaned. Next crash with a local build in place should print a decoded
+backtrace. Portal tab was on the phone (background/asleep) — weak
+suspect only. USER TEST (2026-09-21): a few dozen emoji in a manual
+Chronos notification relays as spaces, no crash — sanitization works
+as designed and the raw-UTF-8 path is gone. If Gmail-traffic crashes
+recur anyway, the decoded backtrace (needs the local build) settles it.
+
+**FIRST COREDUMP DECODED (2026-09-21, coredump.bin read from the device's
+flash coredump partition @0x7f0000/0x10000 via `esptool read_flash`):**
+the crash is the **lwIP TCPIP-core-lock assert**, NOT the UTF-8 path —
+`assert failed: udp_new_ip_type /IDF/components/lwip/lwip/src/core/udp.c:1278
+(Required to lock TCPIP core functionality!)`. Crashed task PC =
+`panic_abort+0x13` (the assert handler); 13 task snapshots captured. This is
+the exact bug in §5 ("phone-time policy hook → esp_sntp_restart (lwIP)"),
+i.e. `esp_sntp_restart()` called from a non-tcpip task. DECODING METHOD
+(no serial log needed, coredump-to-flash works): `pip3 install --user
+--break-system-packages esp-coredump pyelftools`, then `python3 -m
+esp_coredump info_corefile --core coredump.bin --core-format auto
+<preserved firmware.elf>`. The coredump embeds its own app-SHA; the dump's
+SHA (9974fb5e9...) did NOT match the current firmware.elf (c357bef2f...)
+because .pio/build had been cleaned+rebuilt AFTER the crash — flashing the
+app does NOT erase the coredump partition, so the dump was STALE (pre-fix
+build, phone-time hook still on the NimBLE host task). It confirms the root
+cause but is not the recent Gmail-relay crashes. NEXT CRASH PROCEDURE:
+preserve the exact .pio/build/firmware.elf that is flashed (do NOT rebuild
+first), and read the partition BEFORE reflashing:
+`python3 -m esptool --port /dev/ttyUSB0 read_flash 0x7f0000 0x10000
+coredump2.bin`, then decode as above.
+
 ## 4a. Future investigation: clock battery drain while connected
 
 User observation (2026-09-20): the clock's battery drains faster than

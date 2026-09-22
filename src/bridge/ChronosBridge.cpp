@@ -2,6 +2,19 @@
 
 static ChronosBridge* s_instance = nullptr;
 
+// Keep printable ASCII only, like the official client's text encoder
+// (its EncodeClockText maps everything else to '?'). Marketing emails
+// carry heavy UTF-8 runs (U+034F etc.) that we previously relayed raw.
+static String sanitizeNoticeText(const String& in) {
+    String out;
+    out.reserve(in.length());
+    for (unsigned i = 0; i < in.length() && out.length() < 120; i++) {
+        char c = in[i];
+        out += (c >= ' ' && c <= '~') ? c : ' ';
+    }
+    return out;
+}
+
 void ChronosBridge::begin() {
     if (_started) {
         return;
@@ -62,7 +75,10 @@ void ChronosBridge::begin() {
             return;
         }
         if (start) {
-            s_instance->queueNotice(String((char)129) + " " + name);
+            // Phone icon byte (129) + sanitized caller name (the icon must
+            // survive sanitization, so only the name is filtered).
+            s_instance->queueNotice(String((char)129) + " " +
+                                    sanitizeNoticeText(name));
             Serial.printf("[bridge] incoming call: %s\n", name.c_str());
         } else {
             Serial.printf("[bridge] call ended: %s\n", name.c_str());
@@ -120,7 +136,7 @@ void ChronosBridge::relayNotice(const String& text) {
         Serial.println("[bridge] clock not connected, notification dropped");
         return;
     }
-    if (_glance.sendNotice(text.c_str())) {
+    if (_glance.sendNotice(sanitizeNoticeText(text).c_str())) {
         Serial.printf("[bridge] relayed: %s\n", text.c_str());
     }
 }
