@@ -9,6 +9,11 @@ static const char* NTP_SERVER_1 = "time.nist.gov";
 static const char* NTP_SERVER_2 = "pool.ntp.org";
 static const char* NTP_SERVER_3 = "time.google.com";
 
+// How long to let WiFi's built-in auto-reconnect try before we force a
+// clean reconnect, and the minimum gap between forced reconnects.
+static const uint32_t LINK_LOST_GRACE_MS = 30000;
+static const uint32_t FORCE_RECONNECT_COOLDOWN_MS = 60000;
+
 void NetTime::begin() {
     _prefs.begin(NVS_NS, true);
     _ssid = _prefs.getString("ssid", "");
@@ -51,6 +56,42 @@ void NetTime::loop() {
         // WL_CONNECTION_LOST=5, WL_DISCONNECTED=6.
         Serial.printf("[%s] WiFi status -> %d (%s), IP: %s\n", TAG, (int)st,
                       statusName(st), WiFi.localIP().toString().c_str());
+    }
+
+    // Link-loss watchdog. WiFi.setAutoReconnect() handles a plain drop, but
+    // a wedged lwIP stack (see NOTES.md: the udp_new_ip_type panic) leaves
+    // WiFi dead while the rest of the ESP runs. If we were connected and the
+    // link has stayed down past the grace window, force the same clean
+    // disconnect+begin() sequence setCredentials() uses.
+    if (_ssid.length()) {
+        if (st == WL_CONNECTED) {
+            _wasConnected = true;
+            _linkLostAtMs = 0;
+        } else if (_wasConnected) {
+            uint32_t now = millis();
+            if (_linkLostAtMs == 0) {
+                _linkLostAtMs = now;
+                Serial.printf("[%s] link lost (status %d %s, rssi %d dBm) - "
+                              "auto-reconnect grace %lu s\n",
+                              TAG, (int)st, statusName(st), WiFi.RSSI(),
+                              (unsigned long)(LINK_LOST_GRACE_MS / 1000));
+            } else if ((int32_t)(now - _linkLostAtMs) >= (int32_t)LINK_LOST_GRACE_MS &&
+                       (int32_t)(now - _lastForcedReconnectMs) >=
+                           (int32_t)FORCE_RECONNECT_COOLDOWN_MS) {
+                Serial.printf("[%s] link still down %lu s (status %d %s, "
+                              "heap %u) - forcing clean reconnect to '%s'\n",
+                              TAG, (unsigned long)((now - _linkLostAtMs) / 1000),
+                              (int)st, statusName(st), (unsigned)ESP.getFreeHeap(),
+                              _ssid.c_str());
+                WiFi.disconnect(false, false);
+                WiFi.setSleep(false);
+                WiFi.mode(WIFI_STA);
+                delay(100);
+                WiFi.begin(_ssid.c_str(), _pass.c_str());
+                _lastForcedReconnectMs = now;
+                _linkLostAtMs = now;  // fresh grace window for this attempt
+            }
+        }
     }
 
     if (_sntpStarted && !_timeValid) {

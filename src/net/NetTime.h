@@ -49,4 +49,12 @@ private:
     wl_status_t _lastStatus = WL_DISCONNECTED;
     int64_t _lastGoodEpoch = 0;
     uint32_t _nextCheckMs = 0;
+
+    // Link-loss watchdog: WiFi.setAutoReconnect() recovers a plain drop,
+    // but a wedged lwIP stack (see the old udp_new_ip_type panic) leaves
+    // WiFi dead with the rest of the ESP alive. If the link is still down
+    // after a grace window, force the clean disconnect+begin() sequence.
+    bool _wasConnected = false;
+    uint32_t _linkLostAtMs = 0;
+    uint32_t _lastForcedReconnectMs = 0;
 };
