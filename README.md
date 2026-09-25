@@ -1,200 +1,186 @@
 # Glance Clock ESP32 Bridge
 
-An ESP32 firmware that acts as a **cloudless bridge** for the
-[Glance Clock](https://github.com/Hypfer/glance-clock), using the
-[Chronos app](https://chronos.ke/app?id=esp32) +
-[chronos-esp32](https://github.com/fbiego/chronos-esp32) as the data source.
+Firmware for an ESP32 that connects your [Glance Clock](https://github.com/Hypfer/glance-clock)
+to your phone without any cloud service. The clock talks to the ESP32 over
+Bluetooth Low Energy, the phone connects to the ESP32 with the
+[Chronos app](https://chronos.ke/app?id=esp32), and the two are joined
+locally:
 
 ```
-Phone (Chronos app)                         Glance Clock
-  │ notifications, time,                        ▲
-  │ battery                                     │ BLE central (NimBLE)
-  ▼                                             │ protobuf over GATT
-ESP32 ── chronos-esp32 (peripheral) ────────────┴── GlanceClient (central)
-  │  both roles on one NimBLE host
-  ├─ WiFi + NTP (authoritative time) ── Current Time Service for the clock
-  └─ Web portal  http://<name>.local   status / PIN / weather / controls
+Phone (Chronos app)                          Glance Clock
+  | notifications, time,                        ^
+  | battery                                     | BLE (NimBLE)
+  v                                             | protobuf over GATT
+ESP32 -- chronos-esp32 (peripheral) ------------+-- GlanceClient (central)
+  |  both roles on one NimBLE host
+  |- WiFi + NTP (authoritative time) -- Current Time Service for the clock
+  |- Web portal  http://<name>.local   status / PIN / weather / controls
+  '- Open-Meteo weather -- 24h forecast ring on the clock face
 ```
 
-Protocol source: [Hypfer/glance-clock](https://github.com/Hypfer/glance-clock)
-(WTFPL). The clock's BLE protocol is a 4-byte command header plus a protobuf
-payload, written to characteristic
-`5075fb2e-1e0e-11e7-93ae-92361f002671` of service
-`5075f606-1e0e-11e7-93ae-92361f002671`. Some commands are single-byte
-(35, 30, 31, 43, 44, 60, 61); sending those as 4-byte frames is rejected with
-a vendor ATT error (0x81).
+Everything runs on your LAN. No accounts, no subscriptions, no cloud.
 
-**Clock firmware:** scenes/forecast (`cmd 7`) require firmware 1.5+ — factory
-0.8.56 rejects them. DFU zips per hardware revision are in
-[Hypfer/glance-clock-assets/firmwares](https://github.com/Hypfer/glance-clock-assets/tree/master/firmwares)
-(the zip name starts with the hw rev, e.g. `0503...` = hw 5.3); flash via
-nRF Connect DFU. After a DFU, re-pair once (the update wipes the clock's
-bond store). **Warning: a clock factory reset also reverts the firmware
-back to the factory version** — after a reset the DFU update must be
-re-flashed.
+## What it does
 
-## Status / roadmap
+- Pairs with the clock once, then reconnects silently on reboot
+- Shows phone notifications on the clock face
+- Pushes the 24h temperature forecast (from Open-Meteo, no API key) as a
+  ring on the clock's carousel
+- Keeps the clock's hands on time: NTP first, then the phone's time, or a
+  manual `settime`
+- Syncs alarms and battery level with the Chronos app
+- Lets you control the clock from a web page or a serial console:
+  brightness, night mode, hands calibration, carousel navigation
 
-- [x] **MVP**: BLE central client, PIN pairing (bonding in NVS), `Notify` command
-- [x] Serial console (see command table below) with terminal line editing
-- [x] Host-side protocol unit tests (native PlatformIO env, 9 cases)
-- [x] **Current Time Service**: the clock polls it after connecting; the
-      ESP32 re-connects the clock whenever the system time changes so the
-      hands follow immediately
-- [x] **Time sources, in priority order**: NTP (authoritative), Chronos
-      phone time (fallback), `settime`
-- [x] **ChronosBridge**: phone time syncs the ESP32, phone notifications are
-      relayed to the clock, clock battery is pushed to the app
-- [x] Settings read/write (command 5): read-modify-write; the clock publishes
-      the new settings back into the data characteristic after a write
-- [x] **Forecast ring**: 24h temperatures from Open-Meteo (no API key),
-      `ForecastScene` in carousel slot 2 (leaves the factory watchface at
-      slot 1 alone); the ring stays in the carousel; auto-refresh every
-      30 min.
-      Note: the factory carousel is slot 0 = empty (renders dim) and
-      slot 1 = the built-in digital watchface — scene pushes to slot 1
-      overwrite the clock's own watchface.
-- [x] **Web portal**: status, headless PIN entry, weather config, carousel
-      and calibration controls (see below)
-- [ ] Chronos alarms -> `Alarms` protobuf
-- [ ] Incoming call -> `CallScene`
-- [ ] Other weather rings (rain / wind / humidity — frame builders exist in
-      the C# reference client)
-- [ ] Undocumented `8e400001-f315-4f60-9fb8-838830daea50` service (read+write+
-      notify, subscribable via `sub on`) — purpose unknown
+## Requirements
 
-## Hardware
+- An ESP32 (the Adafruit Feather ESP32 V2 is the primary target; `esp32s3`
+  and `esp32c3` also build)
+- A Glance Clock (clock firmware 1.5 or newer for the forecast ring)
+- The [Chronos app](https://chronos.ke/app?id=esp32) on your phone
+  (optional; notifications, alarms and time push need it)
+- WiFi (optional; NTP time + the web portal need it)
 
-Primary: Adafruit Feather ESP32 V2 (classic ESP32) via the custom board def
-`boards/glance_feather_esp32_v2.json` — do not delete it: the stock Feather
-definition overflows IRAM once WiFi + NimBLE are linked, and the app
-partition of the stock layout is too small. `esp32s3` / `esp32c3` envs build
-too (C3 is built in CI).
+## Build and flash
 
-## Build & flash
+Install [PlatformIO Core](https://platformio.org/install/cli), then:
 
 ```sh
 pio run -e adafruit_feather_esp32_v2 -t upload   # or -e esp32s3 / -e esp32c3
-pio device monitor                               # 115200 baud
-pio test -e native                               # host-side protocol tests
+pio device monitor                               # 115200 baud serial console
 ```
 
-## Pairing
+The serial console is the main way to talk to the bridge. Type `help` for
+the command list.
 
-1. `pio device monitor`, then `scan` — the clock should appear.
-2. **Press the pairing button on the clock.**
-3. Type `pair`. The clock shows a 6-digit PIN on its LED rings.
-4. Enter the PIN **either in the serial monitor or on the web portal**
-   (`http://glancebridge.local` — the form appears automatically while the
-   PIN prompt is active). You have ~25 s per attempt; the clock shows a
-   fresh PIN on each retry.
-5. After a successful pair the ESP32 stores the address in NVS and
-   reconnects silently.
+## First-time setup
 
-Bonding behavior of clock firmware 1.5: the clock **keeps** its bond across
-its own power cycle, but **deletes it when the ESP32 disconnects abnormally**
-(unplug/reflash = supervision timeout). The next connection then requires a
-PIN re-entry — enter it on the web portal or serial and the bond is
-re-established. This is clock-side behavior and cannot be disabled.
+1. **Connect to WiFi** (needed for NTP time and the web portal):
+   ```
+   wifi <your-network> <password>
+   tz EST5EDT,M3.2.0,M11.1.0        # or your local POSIX timezone
+   ```
+   Wait for `[NetTime] time synced via NTP` — the clock hands will follow.
 
-If pairing fails: `bonds` (clears pairings *in the clock*), `forget` (clears
-the stored address), and if needed
-[factory reset the clock](https://github.com/Hypfer/glance-clock#factory-reset).
+2. **Pair the clock** (one time):
+   ```
+   scan
+   ```
+   Press the pairing button on the clock, then:
+   ```
+   pair
+   ```
+   The clock shows a 6-digit PIN on its LED rings. Type it in the serial
+   console (or the web portal — see below). You have about 25 seconds per
+   attempt, and the clock shows a fresh PIN on each retry. After pairing,
+   the bridge reconnects on its own from then on.
+
+3. **Optional: set the forecast location** so the ring appears:
+   ```
+   geo <latitude> <longitude>   # decimal degrees, e.g. geo 40.586 -98.389
+   wx c                         # or wx f for Celsius/Fahrenheit (default F)
+   ```
 
 ## Web portal
 
-Served on the LAN once WiFi is up: `http://glancebridge.local` (name
-configurable per device via `mdns <name>`, stored in NVS — useful with
-several bridges). All pages are self-contained (no external assets).
+Once WiFi is up, open `http://glancebridge.local` in a browser (the name
+is configurable per device with `mdns <name>`). All pages are self-contained.
 
-| Page | Purpose |
+| Page | What it's for |
 | --- | --- |
-| `/` | live status (clock/battery/WiFi/NTP/phone/weather), auto-refresh |
-| `/enter` | PIN form (headless pairing; opens automatically when a PIN is requested) |
-| `/weather` | location (lat/lon), °C/°F, fetch now |
+| `/` | live status: clock, battery, WiFi, NTP, phone, weather |
+| `/enter` | PIN entry during pairing (opens automatically when a PIN is requested) |
+| `/weather` | set location and units, fetch the forecast now |
 | `/control` | carousel prev/next, hands calibration, clear scenes |
 
-## Console commands
+## Serial console commands
 
-| Command | Action |
+| Command | What it does |
 | --- | --- |
 | `scan [ms]` | scan for Glance clocks |
-| `pair` | connect + PIN pairing (press clock button first) |
+| `pair` | connect and pair (press the clock's pairing button first) |
 | `notify <text>` | show a notification on the clock |
-| `stop` / `start` | carousel: previous / next face (single-byte 30/31) |
+| `stop` / `start` | carousel: previous / next face |
 | `clear` | clear all scenes |
 | `bonds` | clear pairings stored in the clock |
 | `night on\|off` | night mode (settings write) |
 | `calib` / `calok` | start / confirm hands calibration |
-| `face` | (re)install the digital watchface as carousel slot 0 |
-| `gatt` | dump the clock's GATT table (names + values) |
-| `sub on\|off` | (un)subscribe to the undocumented 8e400001 channel |
-| `settings` | read the clock's published settings (best effort) |
-| `cfg [0-255]` | read-modify-write settings; optional brightness |
-| `batt` | read the clock's battery level (also cached for `status`) |
-| `geo <lat> <lon>` | store the forecast location (decimal degrees) |
-| `wx [c\|f]` | fetch + show the 24h forecast (unit persisted, default F) |
-| `time` / `settime` | show / set the ESP32's local time (`settime YYYY-MM-DD HH:MM:SS`) |
-| `chronos on\|off` | start the Chronos peripheral / pause the notification relay |
+| `face [slot] [mode]` | custom scene probe (mode 8 = watchface) |
+| `gatt` | dump the clock's GATT table |
+| `settings` | read the clock's published settings |
+| `cfg [0-255]` | write settings (optional brightness) |
+| `batt` | read the clock's battery level |
+| `geo <lat> <lon>` | store the forecast location |
+| `wx [c\|f]` | fetch and show the 24h forecast |
+| `time` / `settime ...` | show / set the ESP32's local time |
+| `chronos on\|off` | start the Chronos peripheral / pause the relay |
+| `alarms` / `alarmpush` | list / push the Chronos alarms to the clock |
+| `call <name>` | fake an incoming call notice (test) |
 | `wifi <ssid> <pass>` | connect to WiFi and sync time via NTP |
 | `wifioff` | clear stored WiFi credentials |
-| `tz [posix]` | show/set timezone, e.g. `tz EST5EDT,M3.2.0,M11.1.0` |
+| `tz [posix]` | show / set the timezone |
 | `forget` | forget the stored clock address |
-| `disc` | clean disconnect (bond-keep diagnostic) |
-| `mdns [name]` | show/set the web portal host name |
-| `status` | clock, WiFi, NTP, phone, battery and settings state |
-| `raw <hex>` | write raw bytes to the data characteristic |
-| `raws <hex>` | write raw bytes to the scene characteristic |
+| `disc` | clean disconnect (diagnostic) |
+| `mdns [name]` | show / set the web portal host name |
+| `status` | connection, clock, WiFi, NTP, phone, battery state |
+| `help` | this list |
 
-## Layout
+## Project layout
 
 ```
-proto/                upstream Glance.proto (patched, see header comment) + nanopb options
-lib/GlanceCore/       protocol layer: command framing + nanopb-generated messages,
-                      Notice/Settings/ForecastScene encoders + decoders
-src/glance/           GlanceClient (NimBLE central: scan, pair, commands, battery, CTS nudge)
-src/bridge/           ChronosBridge (peripheral for the phone: time, notifications, battery)
-src/net/              NetTime (WiFi+SNTP), Forecast (Open-Meteo ring), WebPortal
+proto/                upstream Glance.proto + nanopb options
+lib/GlanceCore/       protocol layer: command framing + generated messages
+src/glance/           GlanceClient: BLE central (scan, pair, commands, battery)
+src/bridge/           ChronosBridge: peripheral for the phone (time, notifications)
+src/net/              NetTime (WiFi + NTP), Forecast (weather ring), WebPortal
 src/Console.h         serial command interface
-test/test_protocol/   host-side protocol tests (pio test -e native)
-boards/               custom Feather ESP32 V2 board definition (no PSRAM workaround)
+boards/               custom Feather ESP32 V2 board definition
 ```
 
-### Regenerating protobuf code
-
-The generated `lib/GlanceCore/src/Glance.pb.[ch]` are committed, so you don't
-need protoc to build. To regenerate after changing `proto/Glance.proto`:
+The generated protobuf code in `lib/GlanceCore/src/` is committed, so a
+normal build needs no protoc. To regenerate it after editing `proto/Glance.proto`:
 
 ```sh
-pip install nanopb            # + grpcio-tools, or a protoc binary
+pip install nanopb
 cd proto
 nanopb_generator -f glance.options -D ../lib/GlanceCore/src Glance.proto
 ```
 
-`glance.options` gives every variable-length field a static size, so the
-generated code never needs malloc.
+## Troubleshooting
 
-## Notes
+- **Pairing fails repeatedly** — `bonds` clears pairings in the clock,
+  `forget` clears the stored address, then try `pair` again.
+- **The clock demands a PIN after a reflash** — clock firmware 1.5 drops
+  the bond when the bridge disconnects abnormally (unplug / reflash). Just
+  enter the PIN again; the bond is re-established.
+- **The forecast ring does not appear** — the clock firmware must be 1.5+;
+  older factory firmware rejects scene commands.
+- **WiFi drops but the bridge keeps running** — the bridge now watches the
+  link and forces a clean reconnect automatically (look for
+  `forcing clean reconnect` in the serial log).
 
-- `NimBLE-Arduino` 2.x needs arduino-esp32 3.x -> this project uses the
-  [pioarduino](https://github.com/pioarduino/platform-espressif32) platform
-  fork, pinned at **54.03.20** (newer versions made IRAM usage worse).
-- Both BLE roles (central to the clock, peripheral for the phone) run on one
-  NimBLE host.
-- **Local dependency patches** (re-apply after a library reinstall):
-  - `ESP32Time.cpp` (`setTime(sc, mn, hr, ...)`): `struct tm` must use
-    `tm_isdst = -1` — the upstream `0` forces standard time, skewing phone
-    time pushes by +1 h during DST.
-  - The web PIN portal assumes `timeformat=unixtime` from Open-Meteo, which
-    returns localtime-as-epoch — exactly what the `ForecastScene.timestamp`
-    field expects.
-- Known firmware quirks (clock 1.5): bond dropped on abnormal central
-  disconnect (see Pairing), rare BLE controller assert (`llc.c`) when the
-  phone and clock connections are established simultaneously (recovers by
-  rebooting; the first clock reconnect is staggered 5 s at boot to reduce
-  the chance).
+## Credits
+
+This project builds on the work of several projects:
+
+- [Hypfer/glance-clock](https://github.com/Hypfer/glance-clock) — the
+  Glance Clock itself and its BLE protocol (the clock side this firmware
+  talks to). The protocol definition lives here, and this project's code
+  is WTFPL to match.
+- [frannraf/glance-clock-control](https://github.com/frannraf/glance-clock-control)
+  — the C# reference client whose validated frame layouts were used to
+  cross-check command and scene formats.
+- [fbiego/chronos-esp32](https://github.com/fbiego/chronos-esp32) — the
+  Chronos BLE peripheral library (time, notifications, alarms, battery)
+  used to connect the phone app to the bridge.
+- [h2zero/NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino) — the
+  BLE stack that runs both the central (clock) and peripheral (phone) roles.
+- [Nanopb](https://github.com/nanopb/nanopb) — the protobuf code generator
+  used for the Glance protocol messages.
+- [Open-Meteo](https://open-meteo.com) — the free weather API behind the
+  forecast ring (no API key required).
 
 ## License
 
-Project code: WTFPL (matches the protocol repo). Dependencies keep their own
-licenses (chronos-esp32 & NimBLE-Arduino: MIT, Nanopb: Zlib).
+Project code: WTFPL (matches the protocol repo). Dependencies keep their
+own licenses (chronos-esp32 & NimBLE-Arduino: MIT, Nanopb: Zlib).
