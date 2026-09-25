@@ -198,13 +198,17 @@ classic ESP32, clock = `GlanceClock_3B e3:75:8d:6f:22:c8`, bonded):**
 ## 2. Protocol knowledge (learned on hardware — preserve!)
 
 Full GATT table dump (see `gatt` command) — Glance service
-`5075f606-...` contains:
-- `5075fb2e-...` **'Data'** — read+write, **NO notify**. Command channel:
-  write `[cmdType, prio, a, b] + protobuf`. Value read returns either empty,
-  or `"Data\0" + protobuf payload` (strip 5 bytes).
-- `5075ffac-...` **'Scene'** — write-only (probably scene streaming)
-- `5075fc78-...` **'State'** — read-only, 1 byte (was 0x00, never changed)
-- `8e400001-...` — read+write+notify with CCCD (see open question)
+`5075f606-1e0e-11e7-93ae-92361f002671` contains:
+- `5075fb2e-1e0e-11e7-93ae-92361f002671` **'Data'** — read+write, **NO
+  notify**. Command channel: write `[cmdType, prio, a, b] + protobuf`.
+  Value read returns either empty, or `"Data\0" + protobuf payload` (strip
+  5 bytes).
+- `5075ffac-1e0e-11e7-93ae-92361f002671` **'Scene'** — write-only
+  (probably scene streaming)
+- `5075fc78-1e0e-11e7-93ae-92361f002671` **'State'** — read-only, 1 byte
+  (was 0x00, never changed)
+- `8e400001-f315-4f60-9fb8-838830daea50` — read+write+notify with CCCD
+  (see open question)
 - Also standard services: 0x1800, 0x1801, 0x180a (device info), 0x180f
   (battery, read+notify).
 - Settings message from clock (when it publishes) is prefixed `"Data\0"`;
@@ -246,8 +250,12 @@ mkdir -p ~/.local/bin && printf '#!/bin/sh\nexec python3 -m grpc_tools.protoc "$
   > ~/.local/bin/protoc && chmod +x ~/.local/bin/protoc
 export PATH="$HOME/.local/bin:$PATH"
 pio run -e adafruit_feather_esp32_v2   # downloads platform + xtensa toolchain + libs (~4.5GB)
-pio test -e native                     # 7 protocol tests must pass
 ```
+
+> NOTE (2026-09-25): the native protocol tests (`pio test -e native`) were
+> REMOVED in commit 7e14a79 ("Investigating panics during run") — the
+> test/ tree is gone and NOTES references to them are historical. A new
+> host-side test suite can be rebuilt around lib/GlanceCore if needed.
 
 **Disk discipline (7.9GB VM disk — it WILL fill up):**
 - `~/.platformio/.cache` grows with every package install; `rm -rf` it freely.
@@ -344,6 +352,23 @@ first), and read the partition BEFORE reflashing:
 `python3 -m esptool --port /dev/ttyUSB0 read_flash 0x7f0000 0x10000
 coredump2.bin`, then decode as above.
 
+**WIFI DROP WITHOUT PANIC (2026-09-23):** WiFi died while the ESP32 stayed
+alive (no coredump written — coredumps only fire on a fatal panic). User
+had to `wifioff` (clears creds → `WiFi.disconnect`) to revive the link,
+which fits a WEDGED lwIP stack: the same bug that asserts as
+`udp_new_ip_type` in the old build can instead HANG the TCPIP core lock,
+killing WiFi while BLE/loop keep running. To distinguish "plain drop" from
+"lwIP wedge" and self-heal, NetTime got a LINK-LOSS WATCHDOG (2026-09-23):
+after seeing a real `WL_CONNECTED`, if the link stays down past
+`LINK_LOST_GRACE_MS` (30 s) and auto-reconnect hasn't recovered it, force
+the clean `WiFi.disconnect(false,false)` + `setSleep(false)` + `mode(STA)`
++ `delay(100)` + `begin()` sequence (same as `setCredentials`), gated by
+`FORCE_RECONNECT_COOLDOWN_MS` (60 s) so a flaky AP doesn't get hammered.
+Logs status, RSSI, and heap around the force for diagnosis. Monitor capture
+still the primary tool for the next drop:
+`pio device monitor -f esp32_exception_decoder | tee wifi-drop-$(date +%s).log`
+— NetTime already logs every `WiFi status -> N` transition.
+
 ## 4a. Future investigation: clock battery drain while connected
 
 User observation (2026-09-20): the clock's battery drains faster than
@@ -439,5 +464,6 @@ Sketch:
   CTS keeps its old value until first valid refresh.
 - User's machine builds from `/home/matdave/GIT/python/glanceclock` (they
   sync the repo there themselves); default env is their Feather board.
-- All native tests: `pio test -e native` → 7 pass. Reference frame test
-  (`02 30 00 00 22 03 12 01 41`) is byte-exact from the protocol docs.
+- Native tests were REMOVED in 7e14a79 (see section 3). The historical
+  reference frame test (`02 30 00 00 22 03 12 01 41`) is byte-exact from
+  the protocol docs.
