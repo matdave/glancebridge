@@ -163,7 +163,7 @@ private:
         Serial.println("  cfg [0-255]        write settings (read-modify-write; optional brightness)");
         Serial.println("  batt               read the clock's battery level");
         Serial.println("  geo <lat> <lon>    store location for the forecast ring");
-        Serial.println("  wx [c|f]           fetch + show 24h forecast (unit persisted, default F)");
+        Serial.println("  wx [c|f]           fetch + show 24h weather rings (temp/rain/wind/humidity)");
         Serial.println("  time               show the ESP32's local time");
         Serial.println("  settime ...        set local time: settime YYYY-MM-DD HH:MM:SS");
         Serial.println("  chronos on|off     start the Chronos peripheral / pause the relay");

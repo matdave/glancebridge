@@ -53,6 +53,18 @@ classic ESP32, clock = `GlanceClock_3B e3:75:8d:6f:22:c8`, bonded):**
   1.5 - likely a 1.6+ feature; `face [slot] [mode]` now takes args for
   probing other display modes. So no auto slot-0
   install (manual `face` command kept for experiments).
+  **WEATHER RINGS (2026-09-25)**: `wx` now fetches four Open-Meteo hourly
+  variables in ONE request (`temperature_2m, precipitation_probability,
+  wind_speed_10m, relative_humidity_2m`; `wind_speed_unit=mph` when F,
+  `kmh` when C) and pushes a ring per slot: temp=2, rain=3, wind=4,
+  humidity=5 (factory slots 0/1 still untouched). Icon ids from the C#
+  reference: 143=0x8F thermometer, 149=0x95 rain, 152=0x98 wind,
+  144=0x90 humidity (all 0xC2-prefixed, value placeholder 0x08). Ring
+  scales: rain/humidity fixed 0..100 %, wind auto 0..day-max, temp
+  auto. `sendRing()` in Forecast shares one timestamp (`times[idx]`) and
+  the same `encodeForecastCommand` frame — NO proto/GlanceCore changes.
+  NOT yet hardware-validated; verify all four rings render and the
+  carousel advances with 31.
 - ChronosBridge: phone time sync + notification relay — built, starts at
   boot; status shows phone=0 until the Chronos app test is actually run
 - **KNOWN TRANSIENT — BLE controller crash**: `ASSERT_PARAM(0 0) in llc.c
@@ -260,9 +272,8 @@ pio run -e adafruit_feather_esp32_v2   # downloads platform + xtensa toolchain +
 **Disk discipline (7.9GB VM disk — it WILL fill up):**
 - `~/.platformio/.cache` grows with every package install; `rm -rf` it freely.
 - `~/.platformio/packages/toolchain-riscv32-esp` is 2.4GB and only needed for
-  the `esp32c3` env. Delete it locally; CI (.github/workflows/build.yml)
-  builds C3 in the cloud. pio may re-install it on the next feather build —
-  if disk explodes again, delete + retry immediately.
+  the (removed 2026-09-25, CI-failing) `esp32c3` env. Delete it locally; it
+  may be re-installed by pio — if disk explodes again, delete + retry.
 - `framework-arduinoespressif32-libs` (1.9GB) + xtensa toolchain (~1.2GB) are
   required; don't delete both at once while a build is needed.
 - Build failures of two kinds seen: `Errno 28 No space left` during tool

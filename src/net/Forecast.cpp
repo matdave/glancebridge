@@ -86,7 +86,7 @@ int64_t Forecast::wallEpochNow() {
     return days * 86400LL + t.tm_hour * 3600LL + t.tm_min * 60LL + t.tm_sec;
 }
 
-bool Forecast::fetch(const char* unit, bool toScene) {
+bool Forecast::fetch(const char* unit) {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.printf("[%s] no WiFi\n", TAG);
         return false;
@@ -112,8 +112,10 @@ bool Forecast::fetch(const char* unit, bool toScene) {
     }
 
     String url = "https://api.open-meteo.com/v1/forecast?latitude=" + _lat +
-                 "&longitude=" + _lon + "&hourly=temperature_2m&temperature_unit=" +
-                 (u == 'f' ? "fahrenheit" : "celsius") +
+                 "&longitude=" + _lon +
+                 "&hourly=temperature_2m,precipitation_probability,wind_speed_10m,relative_humidity_2m" +
+                 "&temperature_unit=" + (u == 'f' ? "fahrenheit" : "celsius") +
+                 "&wind_speed_unit=" + (u == 'f' ? "mph" : "kmh") +
                  "&forecast_days=2&timeformat=unixtime&timezone=auto";
     Serial.printf("[%s] fetching forecast (heap=%u max-alloc=%u)...\n", TAG,
                   (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
@@ -147,7 +149,14 @@ bool Forecast::fetch(const char* unit, bool toScene) {
     }
     JsonArray times = doc["hourly"]["time"].as<JsonArray>();
     JsonArray temps = doc["hourly"]["temperature_2m"].as<JsonArray>();
-    size_t n = times.size() < temps.size() ? times.size() : temps.size();
+    JsonArray rain = doc["hourly"]["precipitation_probability"].as<JsonArray>();
+    JsonArray wind = doc["hourly"]["wind_speed_10m"].as<JsonArray>();
+    JsonArray humid = doc["hourly"]["relative_humidity_2m"].as<JsonArray>();
+    size_t n = times.size();
+    if (temps.size() < n) n = temps.size();
+    if (rain.size() < n) n = rain.size();
+    if (wind.size() < n) n = wind.size();
+    if (humid.size() < n) n = humid.size();
     if (n < 24) {
         Serial.printf("[%s] not enough hourly data (%u points)\n", TAG, (unsigned)n);
         _fetching = false;
@@ -175,14 +184,58 @@ bool Forecast::fetch(const char* unit, bool toScene) {
         _fetching = false;
         return false;
     }
+    int64_t ts = times[idx].as<int64_t>();
+
+    // Ring captions (0xC2 prefixes an icon; 0x08 is the current-value
+    // placeholder, per the ForecastScene proto). Icon ids from the C#
+    // reference client: 143 thermometer, 149 rain, 152 wind, 144 humidity.
+    static const uint8_t tmplC[] = {0xC2, 0x8F, 0x08, 0xC2, 0xB0, 'C'};
+    static const uint8_t tmplF[] = {0xC2, 0x8F, 0x08, 0xC2, 0xB0, 'F'};
+    static const uint8_t tmplRain[] = {0xC2, 0x95, 0x08, '%'};
+    static const uint8_t tmplWind[] = {0xC2, 0x98, 0x08};
+    static const uint8_t tmplHumid[] = {0xC2, 0x90, 0x08, '%'};
+    const uint8_t* tmpl = u == 'f' ? tmplF : tmplC;
+
+    // Temperature: auto-scaled to the data. The other rings use the fixed
+    // scale the C# reference applies (0..100 % for rain/humidity, wind
+    // auto-scaled from 0 to the day's max). Each ring is sent regardless of
+    // the others' results (they live in independent carousel slots).
+    ok = sendRing(temps, idx, ts, FORECAST_SLOT, 0x0000FF, 0xFF0000,
+                  INT32_MIN, INT32_MIN, tmpl, 6, "temp");
+    ok = sendRing(rain, idx, ts, RAIN_SLOT, 0x0000FF, 0x00BFFF,
+                  0, 100, tmplRain, sizeof(tmplRain), "rain") && ok;
+    ok = sendRing(wind, idx, ts, WIND_SLOT, 0x00FF00, 0xFF0000,
+                  0, INT32_MIN, tmplWind, sizeof(tmplWind), "wind") && ok;
+    ok = sendRing(humid, idx, ts, HUMIDITY_SLOT, 0x00FFFF, 0x0000FF,
+                  0, 100, tmplHumid, sizeof(tmplHumid), "humidity") && ok;
+    if (ok) {
+        Serial.printf("[%s] weather rings sent (temp/rain/wind/humidity)\n", TAG);
+    } else if (WiFi.status() == WL_CONNECTED && !_glance.isConnected()) {
+        // Clock not up yet (boot): retry soon instead of waiting 30 min.
+        _nextFetchMs = millis() + 60000;
+    }
+    _fetching = false;
+    Serial.printf("[%s] fetch done (ok=%d heap=%u max-alloc=%u)\n", TAG, ok ? 1 : 0,
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    return ok;
+}
+
+bool Forecast::sendRing(const JsonArray& values, size_t idx, int64_t ts,
+                        uint8_t slot, int32_t minColor, int32_t maxColor,
+                        int32_t ringMin, int32_t ringMax,
+                        const uint8_t* tmpl, size_t tmplLen, const char* label) {
+    if (idx + 24 > values.size()) {
+        Serial.printf("[%s] %s: not enough data\n", TAG, label);
+        return false;
+    }
 
     ForecastScene fs = ForecastScene_init_default;
-    fs.timestamp = times[idx].as<int64_t>();
+    fs.timestamp = ts;
 
     int32_t mn = INT32_MAX;
     int32_t mx = INT32_MIN;
     for (int i = 0; i < 24; i++) {
-        long v = lround(temps[idx + i].as<double>());
+        long v = lround(values[idx + i].as<double>());
         if (v < SHRT_MIN) v = SHRT_MIN;
         if (v > SHRT_MAX) v = SHRT_MAX;
         int16_t sv = (int16_t)v;
@@ -192,50 +245,29 @@ bool Forecast::fetch(const char* unit, bool toScene) {
         if (sv > mx) mx = sv;
     }
     fs.values.size = 48;
-    fs.min = mn;
-    fs.max = mx;
-    fs.minColor = 0x0000FF;  // palette-mapped by the clock
-    fs.maxColor = 0xFF0000;
+    // Ring scale: a fixed ringMin/ringMax wins; otherwise auto-scale the
+    // corresponding edge from the data (INT32_MIN = auto).
+    fs.min = ringMin != INT32_MIN ? ringMin : mn;
+    fs.max = ringMax != INT32_MIN ? ringMax : mx;
+    // A flat ring (min == max) renders as an empty circle. Wind auto-scale
+    // (0..day-max) floors the max at 1 like the C# reference client.
+    if (ringMax == INT32_MIN && ringMin == 0 && fs.max < 1) {
+        fs.max = 1;
+    }
+    fs.minColor = minColor;  // palette-mapped by the clock
+    fs.maxColor = maxColor;
 
-    // [thermometer icon][value placeholder]°C / °F  (0xC2 prefixes an icon)
-    static const uint8_t tmplC[] = {0xC2, 0x8F, 0x08, 0xC2, 0xB0, 'C'};
-    static const uint8_t tmplF[] = {0xC2, 0x8F, 0x08, 0xC2, 0xB0, 'F'};
-    const uint8_t* tmpl = u == 'f' ? tmplF : tmplC;
-    memcpy(fs.templateText.bytes, tmpl, 6);
-    fs.templateText.size = 6;
+    memcpy(fs.templateText.bytes, tmpl, tmplLen);
+    fs.templateText.size = (pb_size_t)tmplLen;
 
     uint8_t frame[128];
-    size_t len = Glance::encodeForecastCommand(frame, sizeof(frame), &fs, FORECAST_SLOT);
+    size_t len = Glance::encodeForecastCommand(frame, sizeof(frame), &fs, slot);
     if (len == 0) {
-        Serial.printf("[%s] forecast encode failed\n", TAG);
-        _fetching = false;
+        Serial.printf("[%s] %s encode failed\n", TAG, label);
         return false;
     }
-    Serial.printf("[%s] 24h forecast: %ld..%ld °%s (%s char, slot %u)\n", TAG, (long)mn,
-                  (long)mx, u == 'f' ? "F" : "C", toScene ? "scene" : "data",
-                  (unsigned)FORECAST_SLOT);
-    ok = toScene ? _glance.sendSceneCommand(frame, len) : _glance.sendCommand(frame, len);
-    if (ok && !toScene) {
-        if (FORECAST_DISPLAY_MS > 0) {
-            // Show the ring, then delete the scene (see loop()).
-            _hideAtMs = millis() + FORECAST_DISPLAY_MS;
-            Serial.printf("[%s] forecast sent - showing for %us\n", TAG,
-                          (unsigned)(FORECAST_DISPLAY_MS / 1000));
-        } else {
-            Serial.printf("[%s] forecast sent - stays in the carousel\n", TAG);
-        }
-    }
-    if (!ok) {
-        Serial.printf("[%s] forecast NOT accepted%s\n", TAG,
-                      toScene ? " (scene char len limit - use 'wx')"
-                              : " (check connection)");
-        if (!toScene && WiFi.status() == WL_CONNECTED && !_glance.isConnected()) {
-            // Clock not up yet (boot): retry soon instead of waiting 30 min.
-            _nextFetchMs = millis() + 60000;
-        }
-    }
-    _fetching = false;
-    Serial.printf("[%s] fetch done (ok=%d heap=%u max-alloc=%u)\n", TAG, ok ? 1 : 0,
-                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    bool ok = _glance.sendCommand(frame, len);
+    Serial.printf("[%s] %s: %ld..%ld (slot %u) %s\n", TAG, label, (long)fs.min,
+                  (long)fs.max, (unsigned)slot, ok ? "sent" : "rejected");
     return ok;
 }

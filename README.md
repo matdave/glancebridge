@@ -24,8 +24,8 @@ Everything runs on your LAN. No accounts, no subscriptions, no cloud.
 
 - Pairs with the clock once, then reconnects silently on reboot
 - Shows phone notifications on the clock face
-- Pushes the 24h temperature forecast (from Open-Meteo, no API key) as a
-  ring on the clock's carousel
+- Pushes the 24h weather forecast (from Open-Meteo, no API key) as rings on
+  the clock's carousel: temperature, rain, wind, and humidity
 - Keeps the clock's hands on time: NTP first, then the phone's time, or a
   manual `settime`
 - Syncs alarms and battery level with the Chronos app
@@ -34,8 +34,8 @@ Everything runs on your LAN. No accounts, no subscriptions, no cloud.
 
 ## Requirements
 
-- An ESP32 (the Adafruit Feather ESP32 V2 is the primary target; `esp32s3`
-  and `esp32c3` also build)
+- An ESP32 (the Adafruit Feather ESP32 V2 is the primary target; an
+  `esp32s3` build is also available)
 - A Glance Clock (clock firmware 1.5 or newer for the forecast ring)
 - The [Chronos app](https://chronos.ke/app?id=esp32) on your phone
   (optional; notifications, alarms and time push need it)
@@ -46,7 +46,7 @@ Everything runs on your LAN. No accounts, no subscriptions, no cloud.
 Install [PlatformIO Core](https://platformio.org/install/cli), then:
 
 ```sh
-pio run -e adafruit_feather_esp32_v2 -t upload   # or -e esp32s3 / -e esp32c3
+pio run -e adafruit_feather_esp32_v2 -t upload   # or -e esp32s3
 pio device monitor                               # 115200 baud serial console
 ```
 
@@ -111,7 +111,7 @@ is configurable per device with `mdns <name>`). All pages are self-contained.
 | `cfg [0-255]` | write settings (optional brightness) |
 | `batt` | read the clock's battery level |
 | `geo <lat> <lon>` | store the forecast location |
-| `wx [c\|f]` | fetch and show the 24h forecast |
+| `wx [c\|f]` | fetch and show the 24h weather rings (temp / rain / wind / humidity) |
 | `time` / `settime ...` | show / set the ESP32's local time |
 | `chronos on\|off` | start the Chronos peripheral / pause the relay |
 | `alarms` / `alarmpush` | list / push the Chronos alarms to the clock |
@@ -153,7 +153,7 @@ nanopb_generator -f glance.options -D ../lib/GlanceCore/src Glance.proto
 - **The clock demands a PIN after a reflash** — clock firmware 1.5 drops
   the bond when the bridge disconnects abnormally (unplug / reflash). Just
   enter the PIN again; the bond is re-established.
-- **The forecast ring does not appear** — the clock firmware must be 1.5+;
+- **The forecast rings do not appear** — the clock firmware must be 1.5+;
   older factory firmware rejects scene commands.
 - **WiFi drops but the bridge keeps running** — the bridge now watches the
   link and forces a clean reconnect automatically (look for

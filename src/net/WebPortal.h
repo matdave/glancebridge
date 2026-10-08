@@ -330,8 +330,8 @@ private:
                 "</form></div>";
         body += "<div class=card><div class=note>Coordinates are decimal "
                 "degrees (e.g. 40.586 -98.389). Saving also triggers a "
-                "forecast refresh; the ring auto-refreshes every 30 min and "
-                "shows for 15 s.</div></div>";
+                "weather refresh; the rings (temp/rain/wind/humidity) "
+                "auto-refresh every 30 min and stay in the carousel.</div></div>";
         page("GlanceBridge - Weather", "weather", "", body);
     }
 
