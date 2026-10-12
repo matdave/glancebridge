@@ -164,6 +164,8 @@ private:
         Serial.println("  batt               read the clock's battery level");
         Serial.println("  geo <lat> <lon>    store location for the forecast ring");
         Serial.println("  wx [c|f]           fetch + show 24h weather rings (temp/rain/wind/humidity)");
+        Serial.println("  wxapi [nws|om]     weather provider: nws (api.weather.gov, US) or om");
+        Serial.println("                     (Open-Meteo, worldwide)");
         Serial.println("  time               show the ESP32's local time");
         Serial.println("  settime ...        set local time: settime YYYY-MM-DD HH:MM:SS");
         Serial.println("  chronos on|off     start the Chronos peripheral / pause the relay");
@@ -172,6 +174,7 @@ private:
         Serial.println("  call <name>        fake an incoming call notice (test)");
         Serial.println("  wifi <ssid> <pass> connect to WiFi and sync time via NTP");
         Serial.println("  wifioff            clear stored WiFi credentials");
+        Serial.println("  wifiap [on|off]    show/start/stop the setup AP (headless WiFi setup)");
         Serial.println("  tz [posix]         show/set timezone, e.g. tz EST5EDT,M3.2.0,M11.1.0");
         Serial.println("  forget             forget stored clock address");
         Serial.println("  disc               clean disconnect (bond-keep diagnostic)");
@@ -340,6 +343,17 @@ private:
                 return;
             }
             _forecast.fetch(unit);
+        } else if (cmd == "wxapi") {
+            arg.trim();
+            arg.toLowerCase();
+            if (arg == "nws" || arg == "om") {
+                _forecast.setProvider(arg);
+            } else {
+                Serial.printf("[console] weather provider: %s\n",
+                              _forecast.provider() == "nws" ? "nws" : "om");
+                Serial.println("[console] switch with: wxapi nws|om "
+                               "(nws = api.weather.gov, US only)");
+            }
         } else if (cmd == "time") {
             struct tm t;
             if (getLocalTime(&t)) {
@@ -378,6 +392,21 @@ private:
             }
         } else if (cmd == "wifioff") {
             _net.clearCredentials();
+        } else if (cmd == "wifiap") {
+            if (arg == "on") {
+                _net.startSetupAp();
+            } else if (arg == "off") {
+                _net.stopSetupAp();
+            } else {
+                Serial.printf("[console] setup AP: %s\n",
+                              _net.setupActive() ? "on" : "off");
+                if (_net.setupActive()) {
+                    Serial.printf("[console] SSID: %s  portal: http://%s/\n",
+                                  _net.setupSsid().c_str(),
+                                  WiFi.softAPIP().toString().c_str());
+                }
+                Serial.println("[console] start/stop with: wifiap on|off");
+            }
         } else if (cmd == "tz") {
             if (arg.length()) {
                 _net.setTimezone(arg);
@@ -428,6 +457,11 @@ private:
             Serial.printf("[console] wifi=%d(%s) ntp=%d heap=%u\n", (int)WiFi.status(),
                           _net.isConnected() ? "up" : "down", _net.timeValid() ? 1 : 0,
                           (unsigned)ESP.getFreeHeap());
+            if (_net.setupActive()) {
+                Serial.printf("[console] setup AP: %s (portal http://%s/)\n",
+                              _net.setupSsid().c_str(),
+                              WiFi.softAPIP().toString().c_str());
+            }
             if (_client.firmwareVersion().length()) {
                 Serial.printf("[console] clock firmware: %s\n",
                               _client.firmwareVersion().c_str());

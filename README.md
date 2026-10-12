@@ -24,8 +24,9 @@ Everything runs on your LAN. No accounts, no subscriptions, no cloud.
 
 - Pairs with the clock once, then reconnects silently on reboot
 - Shows phone notifications on the clock face
-- Pushes the 24h weather forecast (from Open-Meteo, no API key) as rings on
-  the clock's carousel: temperature, rain, wind, and humidity
+- Pushes the 24h weather forecast (Open-Meteo worldwide, or the US
+  National Weather Service) as rings on the clock's carousel: temperature,
+  rain, wind, and humidity
 - Keeps the clock's hands on time: NTP first, then the phone's time, or a
   manual `settime`
 - Syncs alarms and battery level with the Chronos app
@@ -62,6 +63,13 @@ the command list.
    ```
    Wait for `[NetTime] time synced via NTP` — the clock hands will follow.
 
+   No laptop handy? About 3 minutes after boot with no (or failing) WiFi
+   credentials the bridge opens its own open network `GlanceBridge-Setup-XXXX`
+   (XXXX = its MAC suffix). Join it with your phone — the WiFi setup page
+   pops up automatically (or open `http://192.168.4.1`), pick your network,
+   enter the password, and the bridge switches over and closes the setup
+   network.
+
 2. **Pair the clock** (one time):
    ```
    scan
@@ -79,6 +87,7 @@ the command list.
    ```
    geo <latitude> <longitude>   # decimal degrees, e.g. geo 40.586 -98.389
    wx c                         # or wx f for Celsius/Fahrenheit (default F)
+   wxapi nws                    # optional: US National Weather Service
    ```
 
 ## Web portal
@@ -90,8 +99,13 @@ is configurable per device with `mdns <name>`). All pages are self-contained.
 | --- | --- |
 | `/` | live status: clock, battery, WiFi, NTP, phone, weather |
 | `/enter` | PIN entry during pairing (opens automatically when a PIN is requested) |
-| `/weather` | set location and units, fetch the forecast now |
+| `/weather` | set provider (Open-Meteo / NWS), location and units, fetch the forecast now |
 | `/control` | carousel prev/next, hands calibration, clear scenes |
+| `/wifi` | WiFi setup: scan list + password form (also served on the setup AP) |
+
+The `/wifi` page is also served on the setup AP (`GlanceBridge-Setup-XXXX`,
+open network, captive DNS — any URL redirects to it) that the bridge opens
+by itself when WiFi stays down; see *First-time setup* above.
 
 ## Serial console commands
 
@@ -112,12 +126,14 @@ is configurable per device with `mdns <name>`). All pages are self-contained.
 | `batt` | read the clock's battery level |
 | `geo <lat> <lon>` | store the forecast location |
 | `wx [c\|f]` | fetch and show the 24h weather rings (temp / rain / wind / humidity) |
+| `wxapi [nws\|om]` | weather provider: `nws` (api.weather.gov, US only) or `om` (Open-Meteo, worldwide) |
 | `time` / `settime ...` | show / set the ESP32's local time |
 | `chronos on\|off` | start the Chronos peripheral / pause the relay |
 | `alarms` / `alarmpush` | list / push the Chronos alarms to the clock |
 | `call <name>` | fake an incoming call notice (test) |
 | `wifi <ssid> <pass>` | connect to WiFi and sync time via NTP |
 | `wifioff` | clear stored WiFi credentials |
+| `wifiap [on\|off]` | show / start / stop the WiFi setup AP |
 | `tz [posix]` | show / set the timezone |
 | `forget` | forget the stored clock address |
 | `disc` | clean disconnect (diagnostic) |

@@ -16,6 +16,11 @@
 // this device class). Configure over serial:
 //   wifi <ssid> <password>
 //   tz <posix tz string>    e.g. tz EST5EDT,M3.2.0,M11.1.0
+//
+// Headless provisioning: when the STA link stays down (no credentials, or
+// credentials that keep failing) the bridge opens an open setup AP
+// ("GlanceBridge-Setup-XXXX") and the web portal serves a /wifi page on it
+// with captive DNS - see startSetupAp() and NOTES.md 4b.
 
 class NetTime {
 public:
@@ -25,6 +30,16 @@ public:
     bool setCredentials(const String& ssid, const String& pass);
     void clearCredentials();
     void setTimezone(const String& tz);
+
+    // Setup AP for headless WiFi provisioning. Started automatically when
+    // the link stays down (30 s with nothing stored, 3 min with failing
+    // credentials); also drivable manually ('wifiap on|off' over serial).
+    // While active the STA side is PAUSED - its connect attempts hop
+    // channels and would break the AP for connected phones.
+    bool setupActive() const { return _setupAp; }
+    String setupSsid() const { return _setupSsid; }
+    void startSetupAp();
+    void stopSetupAp();
 
     bool isConnected() const { return WiFi.isConnected(); }
     bool timeValid() const { return _timeValid; }
@@ -57,4 +72,9 @@ private:
     bool _wasConnected = false;
     uint32_t _linkLostAtMs = 0;
     uint32_t _lastForcedReconnectMs = 0;
+
+    // Headless provisioning state (see setupActive()).
+    bool _setupAp = false;
+    String _setupSsid;
+    uint32_t _downSinceMs = 0;  // start of the current continuous down period
 };

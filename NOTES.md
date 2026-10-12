@@ -409,13 +409,59 @@ Levers to try (in order):
 Note: heap telemetry from 2026-09-20 sits in main loop + Forecast fetch
 for the crash hunt; unrelated to this but same session.
 
-## 4b. Future investigation: WiFi setup AP (headless provisioning)
+## 4b. WiFi setup AP (headless provisioning)
 
-User request (2026-09-20): when the ESP32 can't connect to WiFi (no
-credentials, or repeated auth failures), spin up its own WiFi network so
-a phone can join it and configure the real credentials — no laptop.
+**IMPLEMENTED 2026-10-12; REVISED after first hardware test** (AP seemed
+absent without creds; phones got kicked off the AP from the captive-portal
+sheet). How it works now:
+- **Trigger** (`NetTime::loop`): link down continuously -> AP opens.
+  30 s (`SETUP_TRIGGER_NO_CREDS_MS`) when nothing is stored, 3 min
+  (`SETUP_TRIGGER_MS`) when stored credentials keep failing. Brief flaps
+  keep resetting the timer; the AP closes the moment `WL_CONNECTED` is
+  seen again. `stopSetupAp` resets the down-timer so a failed attempt
+  gets a fresh grace window. begin() logs the pending open when no creds.
+- **STA PAUSED while the AP is up** (the kick fix): `startSetupAp` does
+  `setAutoReconnect(false)` + `disconnect()`; STA connect attempts scan
+  every channel and the softAP follows them off-channel -> phones drop
+  mid-session. The link-loss watchdog is skipped while `_setupAp`.
+  Resume on close: `stopSetupAp` re-enables autoReconnect and `WiFi.begin`s
+  the stored credentials when the link is still down.
+- **AP**: open network `GlanceBridge-Setup-XXXX` (last 4 hex chars of the
+  colon-stripped STA MAC), default IP 192.168.4.1. Manual control: console
+  `wifiap on|off` (no arg = status; also printed in `status`).
+- **Portal on the AP** (`WebPortal::handle`): same WebServer instance
+  serves the AP interface; wildcard DNSServer (53 → AP IP) plus a 302 for
+  every unknown path to `http://192.168.4.1/wifi` so phones pop the page.
+  `/` redirects to `/wifi` in AP mode; nav bar collapses to the single
+  Wi-Fi tab; header shows the raw IP (mDNS only announced once STA is
+  connected, tracked by `_mdnsUp`).
+- **VALIDATED 2026-10-12**: AP auto-open + captive flow + credential save
+  all work; async scan kicks the phone off the AP (expected, single radio)
+  but the completed results render on reconnect.
+- **`/wifi` page**: scanning is EXPLICIT and ASYNC (`?scan=1` ->
+  `WiFi.scanNetworks(true)`; the "Scanning…" page meta-refreshes every 3 s
+  until `WiFi.scanComplete()` >= 0). Rationale: a scan hops channels, and
+  the original blocking auto-scan on first page load was what kicked the
+  phone out of the captive-portal sheet mid-load. First load = form only
+  (manual SSID entry always available; hidden networks need it). Networks
+  render as no-JS links `/wifi?n=<index>` prefilling the form (index into
+  the stored scan results, so no URL-encoding of SSIDs). PLUS: a BLOCKING
+  pre-scan runs in `startSetupAp()` BEFORE `softAP()` (no clients connected
+  yet -> nobody gets kicked), so the first page load already has results.
+- **POST flow** (deferred switch): the handler sets `_wifiSubmitPending`
+  and answers with a STATIC "Saved - switching to <ssid>" page (no meta
+  refresh); `handle()` applies `setCredentials` on the next pass after a
+  500 ms flush delay - `setCredentials` closes the AP first
+  (stopSetupAp) and would otherwise kill the response mid-flight. On the
+  LAN (AP off) it stays the old redirect flow. SSIDs HTML-escaped
+  (`htmlEsc`) everywhere.
+- Caveats: AP+BLE coex still degrades the clock link during provisioning
+  (acceptable); an explicit async scan can still momentarily disturb the
+  AP - user-invoked only; `wifioff` + no action re-opens the portal after
+  30 s (use `wifiap off` if you genuinely want an offline bridge).
 
-Sketch:
+Original sketch (kept for context):
+
 1. Trigger: WiFi not connected ~3 min after boot, either because
    credentials are empty or after N failed attempts (NetTime tracks the
    status transitions already).
@@ -435,6 +481,88 @@ Sketch:
    risk while provisioning (it appears only when WiFi is down) — still,
    consider only enabling it when credentials are absent or failing, not
    during normal operation.
+
+## 4d. Weather provider selection: Open-Meteo or NWS (2026-10-12, built untested)
+
+User request: NWS is usually more accurate where they live. `Forecast` was
+refactored so both providers normalize into a private `Hourly` struct
+(24 floats x temp/rain/wind/humid + clock-epoch ts) and `sendRings()` is
+provider-free. `sendRing` now takes `const float*` instead of a JsonArray
+(impl detail leak removed). Selection: NVS "weather"/"provider" ("om"|"nws",
+default om), console `wxapi nws|om`, /weather portal radio; switching
+schedules an immediate refetch.
+
+NWS implementation notes (api.weather.gov, no key, US only):
+- Two-request flow: `points/{lat},{lon}` -> `properties.forecastHourly`
+  URL -> hourly forecast. Identifying User-Agent REQUIRED by NWS policy
+  (`glanceclock-bridge/1.0 (local ESP32 bridge)`), strict redirects
+  enabled, 404 means "not a US location".
+- The hourly response (~156 periods, ~100 KB raw) does NOT fit the heap as
+  a String (max-alloc ~49 KB) - it is STREAM-parsed with an ArduinoJson
+  filter (startTime / temperature.value+unitCode /
+  probabilityOfPrecipitation.value / windSpeed / relativeHumidity.value).
+  The points response (~3-5 KB) is parsed from a String.
+- Timestamps: startTime "2026-10-12T15:00:00-05:00" is already LOCAL wall
+  clock - components go straight into civilEpoch (Hinnant, now a shared
+  file-static also used by wallEpochNow); the UTC offset is IGNORED (the
+  clock wants localtime-as-epoch, same encoding Open-Meteo's
+  timeformat=unixtime+timezone=auto yields).
+- Units: temperature comes as degC or degF (unitCode wmoUnit:degC/degF) ->
+  converted to the ring unit; windSpeed is prose ("10 mph", "5 to 10
+  mph", "15 km/h") -> first number parsed, mph<->km/h converted;
+  probabilityOfPrecipitation / relativeHumidity may be null -> 0.
+- Current hour = last startTime <= now (linear scan, ascending); if none
+  (fetched mid-hour before the first period) the first period is accepted
+  when it starts within the next hour.
+- **Four bugs found across three hardware tests + live-API verification
+  (2026-10-12, all fixed):** (1) the hourly response is served with
+  `Transfer-Encoding: chunked` over HTTP/1.1 (~160 KB decoded, verified
+  with curl --raw) — `getStreamPtr()` exposes the RAW framing, so
+  ArduinoJson parsed the first chunk-size hex line as the document root
+  and returned Ok with 0 periods ("not enough hourly periods (0)");
+  getString() decodes chunks but cannot hold the body. Fix: a small
+  `ChunkedStream` Stream wrapper in Forecast.cpp strips chunk framing on
+  the fly (auto-detects identity vs chunked by the first non-whitespace
+  byte; handles chunk extensions and the trailing CRLF; validated offline
+  against the real raw stream: 163371 -> 163263 bytes, JSON round-trips).
+  (2) periods carry `temperature` as a BARE number plus a separate
+  "F"/"C" `temperatureUnit` string - NOT the {value, unitCode} object
+  assumed initially (that shape belongs to the gridpoint data endpoints).
+  Filter + extraction updated. rain/humidity stay {unitCode, value}
+  objects (null-tolerant via `| 0.0`). NOTE: api.weather.gov 403s
+  datacenter IPs - curl/webfetch from the dev VM got 403; verification
+  was done from the user's side / via UA header.
+- **Bug (3), second hardware test:** the chunked fix still failed with
+  ArduinoJson `IncompleteInput` - instantly, no stall. ROOT CAUSE (found
+  in core 3.x sources): `NetworkClientSecure::read()` returns **-1, not
+  0**, whenever `available() == 0` ("nothing decrypted yet" - NOT EOF);
+  `available()` comes from `data_to_read()` = `mbedtls_ssl_read(NULL,0)` +
+  `mbedtls_ssl_get_bytes_avail`, i.e. only currently-decrypted bytes. The
+  wrapper treated -1 as a closed socket and ended the stream at the first
+  TLS gap. (Secondary hazard found on the way: `NetworkClient::readBytes`
+  gives up after the Stream timeout, and Arduino `Stream` timeouts are
+  MILLISECONDS - the pre-existing `tls.setTimeout(10)` was 10 ms, not
+  10 s.) Fix: every read is gated on `available()` (the pattern
+  HTTPClient's own body loop uses) with a 10 s deadline and a
+  `connected()` liveness check; only a closed socket ends the stream.
+  `setTimeout` corrected to 10000 ms. A `decoded()` byte counter is
+  logged on parse failure. Re-validated offline with fragmented delivery
+  (1..100000-byte pieces) against the real raw stream + identity fallback.
+- **Bug (4), third hardware test:** chunked decode + reads were fixed, but
+  ArduinoJson then failed with `NoMemory` (110994 bytes decoded). Measured
+  on the host with a counting allocator: the 6-field-filtered 156-period
+  document needs **53 KB** of parser pool when the input is a stream
+  (every kept key/string is copied; dedup is always-on in AJ7), 41.7 KB
+  without startTime - impossible beside mbedTLS's buffers in ~88 KB heap.
+  Fix: `PeriodScanner` (Forecast.cpp) streams the `periods` array and
+  yields ONE object at a time; each element is parsed with the filter
+  into a small reused JsonDocument (4 KB static element buffer) and
+  collection STOPS at 24 points. The first period is the anchor (NWS
+  hourly periods start on the hour; ±1 h sanity check) - the old "last
+  startTime <= now" scan is gone. Validated on host: all 24 Fahrenheit
+  values byte-identical to an independent Python extraction, C/km-h
+  conversion checked too.
+- Same slots/frames as Open-Meteo (slots 2-5, cmd 7), same 30-min refresh.
 
 ## 5. Handy facts
 

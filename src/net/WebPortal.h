@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -16,6 +17,12 @@
 //   /enter    PIN form (no refresh - typing is never wiped)
 //   /weather  location + unit + fetch-now
 //   /control  carousel prev/next, hands calibration, clear scenes
+//   /wifi     WiFi setup: scan list + credentials form
+//
+// While NetTime's setup AP is up (headless provisioning), the same server
+// also answers on the AP interface: "/" redirects to /wifi, every unknown
+// path redirects there too, and a wildcard DNS points all names at the AP
+// IP so phones pop the setup page automatically.
 //
 // Handlers run from portal.handle() on the main task (also called inside
 // the PIN wait loop, since the main loop is blocked while pairing).
@@ -60,24 +67,55 @@ public:
         if (_running) {
             // Re-announce under the new name; the HTTP server keeps its IP.
             MDNS.end();
-            if (MDNS.begin(_host)) {
+            _mdnsUp = false;
+            if (WiFi.status() == WL_CONNECTED && MDNS.begin(_host)) {
                 MDNS.addService("http", "tcp", 80);
+                _mdnsUp = true;
             }
         }
         return true;
     }
 
-    // Service HTTP. Safe to call from any loop; no-ops until WiFi is up.
+    // Service HTTP. Safe to call from any loop. Runs on the LAN (STA)
+    // interface and, while the setup AP is up, on the AP interface with
+    // captive DNS so phones pop the /wifi page automatically.
     void handle() {
-        if (WiFi.status() != WL_CONNECTED) {
+        bool ap = _net.setupActive();
+        bool staUp = WiFi.status() == WL_CONNECTED;
+        if (!ap && !staUp) {
             _running = false;
             return;
+        }
+        if (ap) {
+            if (!_dnsUp) {
+                _dns.start(53, "*", WiFi.softAPIP());
+                _dnsUp = true;
+                Serial.printf("[portal] captive DNS on %s (setup AP)\n",
+                              WiFi.softAPIP().toString().c_str());
+            }
+            _dns.processNextRequest();
+        } else if (_dnsUp) {
+            _dns.stop();
+            _dnsUp = false;
         }
         if (!_running) {
             startServer();
         }
+        // mDNS only makes sense on the LAN side; (re)announce once it's up.
+        if (staUp && !_mdnsUp && MDNS.begin(_host)) {
+            MDNS.addService("http", "tcp", 80);
+            _mdnsUp = true;
+            Serial.printf("[portal] mDNS: http://%s.local\n", _host.c_str());
+        }
         if (_running) {
             _server.handleClient();
+        }
+        if (_wifiSubmitPending) {
+            // The POST response had time to reach the phone; now the switch
+            // (closes the setup AP, starts STA).
+            _wifiSubmitPending = false;
+            delay(500);
+            _net.setCredentials(_pendingSsid, _pendingPass);
         }
     }
 
@@ -100,20 +138,27 @@ private:
     // ---------------------------------------------------------------- shell
 
     void startServer() {
-        if (MDNS.begin(_host)) {
-            MDNS.addService("http", "tcp", 80);
-            Serial.printf("[portal] mDNS: http://%s.local\n", _host.c_str());
-        }
         _server.on("/", [this]() { handleRoot(); });
         _server.on("/enter", [this]() { handleEnter(); });
         _server.on("/pin", [this]() { handlePin(); });
         _server.on("/weather", [this]() { handleWeather(); });
         _server.on("/control", [this]() { handleControl(); });
-        _server.onNotFound([this]() { _server.sendHeader("Location", "/"); _server.send(302); });
+        _server.on("/wifi", [this]() { handleWifi(); });
+        _server.onNotFound([this]() {
+            if (_net.setupActive()) {
+                // Captive portal: phones/laptops probe arbitrary URLs.
+                _server.sendHeader("Location",
+                                   "http://" + WiFi.softAPIP().toString() + "/wifi");
+            } else {
+                _server.sendHeader("Location", "/");
+            }
+            _server.send(302);
+        });
         _server.begin();
         _running = true;
         Serial.printf("[portal] web portal on http://%s/\n",
-                      WiFi.localIP().toString().c_str());
+                      _net.setupActive() ? WiFi.softAPIP().toString().c_str()
+                                         : WiFi.localIP().toString().c_str());
     }
 
     static const char* CSS() {
@@ -145,7 +190,8 @@ private:
                "font-weight:600}"
                ".btn.acc:active{background:#e0a838}"
                ".btn.warn{background:#2a1c20;border-color:#5a3038;color:#ff7a7f}"
-               "input[type=text]{width:100%;padding:12px;border-radius:10px;"
+               "input[type=text],input[type=password]{width:100%;padding:12px;"
+               "border-radius:10px;"
                "border:1px solid #2a2f37;background:#12151a;color:#e8eaed;"
                "font-size:16px;margin:4px 0 10px}"
                ".pinin{font-size:30px;text-align:center;letter-spacing:10px;"
@@ -174,13 +220,21 @@ private:
                       "<meta name=theme-color content='#161a20'>"
                       "<title>" + String(title) + " - GlanceBridge</title>";
         html += "<style>" + String(CSS()) + "</style>" + extraMeta + "</head><body>";
-        html += "<div class=bar><h1>GlanceBridge</h1><div class=sub>" + _host +
-                ".local</div></div>";
+        // On the setup AP the mDNS name doesn't resolve - show the raw IP.
+        String sub = _net.setupActive() ? String("setup &middot; ") + WiFi.softAPIP().toString()
+                                        : _host + ".local";
+        html += "<div class=bar><h1>GlanceBridge</h1><div class=sub>" + sub + "</div></div>";
         html += "<div class=wrap>" + body + "</div>";
         html += "<div class=nav>";
-        html += navLink("/", "Status", tab, "status");
-        html += navLink("/weather", "Weather", tab, "weather");
-        html += navLink("/control", "Controls", tab, "control");
+        if (_net.setupActive()) {
+            // Provisioning: only WiFi setup matters here.
+            html += navLink("/wifi", "Wi-Fi", tab, "wifi");
+        } else {
+            html += navLink("/", "Status", tab, "status");
+            html += navLink("/weather", "Weather", tab, "weather");
+            html += navLink("/control", "Controls", tab, "control");
+            html += navLink("/wifi", "Wi-Fi", tab, "wifi");
+        }
         html += "</div></body></html>";
         _server.send(200, "text/html", html);
     }
@@ -202,6 +256,12 @@ private:
     // ---------------------------------------------------------------- pages
 
     void handleRoot() {
+        if (_net.setupActive()) {
+            // Setup AP: the only thing that matters is WiFi provisioning.
+            _server.sendHeader("Location", "/wifi");
+            _server.send(302);
+            return;
+        }
         String body = "<div class=card>";
         body += row(dot(_glance.isConnected()), "Clock",
                     _glance.isConnected() ? "connected" : "not connected");
@@ -297,7 +357,11 @@ private:
             String lat = _server.arg("lat");
             String lon = _server.arg("lon");
             String unit = _server.arg("unit");
+            String prov = _server.arg("prov");
             String action = _server.arg("action");
+            if (prov.length()) {
+                _forecast.setProvider(prov);  // schedules an immediate refetch
+            }
             if (lat.length() && lon.length()) {
                 _forecast.setLocation(lat, lon);
             }
@@ -312,12 +376,20 @@ private:
             return;
         }
         bool f = _forecast.unit() == "f";
+        bool nws = _forecast.provider() == "nws";
         String body = "<div class=card><h3>Location</h3>"
                       "<form method=POST action=/weather>"
                       "<label>Latitude</label>"
                       "<input type=text name=lat value='" + _forecast.lat() + "'>"
                       "<label>Longitude</label>"
                       "<input type=text name=lon value='" + _forecast.lon() + "'>";
+        body += "<label>Provider</label><div class=radio>"
+                "<label><input type=radio name=prov value=om";
+        body += nws ? ">" : " checked>";
+        body += "<span>Open-Meteo</span></label>"
+                "<label><input type=radio name=prov value=nws";
+        body += nws ? " checked>" : ">";
+        body += "<span>NWS (US)</span></label></div>";
         body += "<label>Unit</label><div class=radio>"
                 "<label><input type=radio name=unit value=f";
         body += f ? " checked" : "";
@@ -331,7 +403,9 @@ private:
         body += "<div class=card><div class=note>Coordinates are decimal "
                 "degrees (e.g. 40.586 -98.389). Saving also triggers a "
                 "weather refresh; the rings (temp/rain/wind/humidity) "
-                "auto-refresh every 30 min and stay in the carousel.</div></div>";
+                "auto-refresh every 30 min and stay in the carousel. "
+                "Open-Meteo covers the whole world; the National Weather "
+                "Service is US-only but often more accurate there.</div></div>";
         page("GlanceBridge - Weather", "weather", "", body);
     }
 
@@ -421,6 +495,139 @@ private:
         page("GlanceBridge - Controls", "control", "", body);
     }
 
+    // WiFi setup: scan list + credentials form. Served on the setup AP
+    // (headless provisioning) and on the LAN (network change without serial).
+    void handleWifi() {
+        if (_server.method() == HTTP_POST) {
+            String ssid = _server.arg("ssid");
+            String pass = _server.arg("pass");
+            ssid.trim();
+            if (ssid.length() == 0) {
+                _server.sendHeader("Location", "/wifi");
+                _server.send(302);
+                return;
+            }
+            if (_net.setupActive()) {
+                // Defer the switch until the response has gone out: closing
+                // the setup AP kills the phone's connection mid-response.
+                // setCredentials() closes the AP first, then connects.
+                _pendingSsid = ssid;
+                _pendingPass = pass;
+                _wifiSubmitPending = true;
+                _server.send(200, "text/html",
+                             "<!DOCTYPE html><html><head><meta charset=utf-8>"
+                             "<meta name=viewport content='width=device-width,"
+                             "initial-scale=1'>"
+                             "<style>body{background:#0f1115;color:#e8eaed;"
+                             "font-family:sans-serif;display:flex;min-height:100vh;"
+                             "align-items:center;justify-content:center;"
+                             "text-align:center;padding:20px}</style></head><body>"
+                             "<p>Saved - switching to " + htmlEsc(ssid) + ".</p>"
+                             "<p><small>This setup network is closing now. "
+                             "Reconnect your phone to your own Wi-Fi, then open "
+                             "http://" + _host + ".local.<br>If the bridge "
+                             "cannot connect, this setup network reappears in "
+                             "about 3 minutes.</small></p></body></html>");
+            } else {
+                _net.setCredentials(ssid, pass);
+                _server.sendHeader("Location", "/wifi?done=1");
+                _server.send(302);
+            }
+            return;
+        }
+
+        // Scanning is EXPLICIT and ASYNC: a scan hops channels, which kicks
+        // phones off the setup AP - so the first page load (captive portal)
+        // must never trigger one. An in-progress scan renders a
+        // self-refreshing page instead of blocking the server.
+        int sc = WiFi.scanComplete();
+        if (_server.hasArg("scan") && sc != WIFI_SCAN_RUNNING) {
+            WiFi.scanDelete();
+            WiFi.scanNetworks(true);  // async
+            sc = WIFI_SCAN_RUNNING;
+        }
+        String body = "<div class=card><h3>Networks</h3>";
+        if (_server.hasArg("done")) {
+            body += "<p><b>Credentials saved - connecting to " + htmlEsc(_net.ssid()) +
+                    "</b></p>";
+        }
+        if (sc == WIFI_SCAN_RUNNING) {
+            body += "<p class=note>Scanning&hellip;</p></div>";
+            page("GlanceBridge - Wi-Fi", "wifi",
+                 "<meta http-equiv=refresh content=3>", body);
+            return;
+        }
+        if (sc < 0) {
+            // Never scanned (or failed): form-first, scan on request.
+            body += "<p class=note>Tap the button to look for nearby "
+                    "networks, or enter the name manually below.</p>"
+                    "<a class=btn href='/wifi?scan=1'>Scan for networks</a></div>";
+        } else {
+            int shown = 0;
+            for (int i = 0; i < sc && shown < 12; i++) {
+                String s = WiFi.SSID(i);
+                if (s.length() == 0) continue;  // hidden: use the manual form
+                // Links carry the scan index (no URL-encoding of SSIDs).
+                body += "<a class=btn href='/wifi?n=" + String(i) + "'>";
+                if (WiFi.encryptionType(i) != WIFI_AUTH_OPEN) {
+                    body += "&#128274; ";
+                }
+                body += htmlEsc(s) + "<span class=k>&nbsp;&nbsp;" +
+                        String(WiFi.RSSI(i)) + " dBm</span></a>";
+                shown++;
+            }
+            if (shown == 0) {
+                body += "<p class=note>No networks with a visible name.</p>";
+            }
+            body += "<a class=btn href='/wifi?scan=1'>Rescan</a></div>";
+        }
+
+        // Prefill from a tapped network, else blank for manual entry
+        // (hidden SSIDs).
+        String sel;
+        long n = _server.hasArg("n") ? _server.arg("n").toInt() : -1;
+        if (n >= 0 && n < sc) {
+            sel = htmlEsc(WiFi.SSID((int)n));
+        }
+        body += "<div class=card><h3>Connect</h3>"
+                "<form method=POST action=/wifi>"
+                "<label>Network name (SSID)</label>"
+                "<input type=text name=ssid value='" + sel +
+                "' autocomplete=off autocapitalize=none>"
+                "<label>Password</label>"
+                "<input type=password name=pass autocomplete=off>"
+                "<button class='btn acc' style='width:100%'>Connect</button>"
+                "</form></div>";
+        if (_net.ssid().length()) {
+            body += "<div class=card><div class=note>Stored network: " +
+                    htmlEsc(_net.ssid()) + "</div></div>";
+        }
+        body += "<div class=card><div class=note>" +
+                String(_net.setupActive()
+                           ? "The bridge is broadcasting this setup network "
+                             "because it could not reach Wi-Fi. Saving switches "
+                             "it to your network; the portal then closes."
+                           : "Saving reconnects the bridge immediately; NTP time "
+                             "re-syncs once the link is up.") +
+                "</div></div>";
+        page("GlanceBridge - Wi-Fi", "wifi", "", body);
+    }
+
+    static String htmlEsc(const String& s) {
+        String o;
+        o.reserve(s.length());
+        for (unsigned i = 0; i < s.length(); i++) {
+            char c = s[i];
+            if (c == '&') o += "&amp;";
+            else if (c == '<') o += "&lt;";
+            else if (c == '>') o += "&gt;";
+            else if (c == '"') o += "&quot;";
+            else if (c == '\'') o += "&#39;";
+            else o += c;
+        }
+        return o;
+    }
+
     // ------------------------------------------------------------------ pin
 
     GlanceClient& _glance;
@@ -430,8 +637,14 @@ private:
     Preferences _prefs;
     String _host = "glancebridge";
     WebServer _server{80};
+    DNSServer _dns;
     volatile bool _pending = false;
     volatile bool _submitted = false;
     volatile uint32_t _webPin = 0;
     bool _running = false;
+    bool _dnsUp = false;
+    bool _mdnsUp = false;
+    bool _wifiSubmitPending = false;
+    String _pendingSsid;
+    String _pendingPass;
 };

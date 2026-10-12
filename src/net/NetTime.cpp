@@ -14,6 +14,13 @@ static const char* NTP_SERVER_3 = "time.google.com";
 static const uint32_t LINK_LOST_GRACE_MS = 30000;
 static const uint32_t FORCE_RECONNECT_COOLDOWN_MS = 60000;
 
+// Headless provisioning (NOTES.md 4b): open the setup AP when the STA
+// link stays down - quickly when nothing is stored, slower when stored
+// credentials keep failing (they get a fair retry window first).
+static const uint32_t SETUP_TRIGGER_MS = 180000;          // failing credentials
+static const uint32_t SETUP_TRIGGER_NO_CREDS_MS = 30000;  // nothing stored
+static const char* SETUP_SSID_PREFIX = "GlanceBridge-Setup-";
+
 void NetTime::begin() {
     _prefs.begin(NVS_NS, true);
     _ssid = _prefs.getString("ssid", "");
@@ -31,6 +38,10 @@ void NetTime::begin() {
         WiFi.begin(_ssid.c_str(), _pass.c_str());
         Serial.printf("[%s] connecting to WiFi '%s'...\n", TAG, _ssid.c_str());
         applyTz();
+    } else {
+        Serial.printf("[%s] no WiFi credentials - setup portal opens in %lu s "
+                      "(or: wifi <ssid> <pass>)\n", TAG,
+                      (unsigned long)(SETUP_TRIGGER_NO_CREDS_MS / 1000));
     }
 }
 
@@ -58,12 +69,35 @@ void NetTime::loop() {
                       statusName(st), WiFi.localIP().toString().c_str());
     }
 
+    // Headless provisioning trigger: link down continuously -> open the
+    // setup AP (30 s with nothing stored, 3 min when credentials exist but
+    // keep failing). Brief flaps keep resetting the timer; the AP closes
+    // the moment the link comes back.
+    if (st == WL_CONNECTED) {
+        if (_setupAp) {
+            Serial.printf("[%s] connected to '%s' - closing setup portal\n",
+                          TAG, _ssid.c_str());
+            stopSetupAp();
+        }
+        _downSinceMs = 0;
+    } else if (_downSinceMs == 0) {
+        _downSinceMs = millis();
+    } else if (!_setupAp) {
+        uint32_t trigger =
+            _ssid.length() ? SETUP_TRIGGER_MS : SETUP_TRIGGER_NO_CREDS_MS;
+        if ((int32_t)(millis() - _downSinceMs) >= (int32_t)trigger) {
+            Serial.printf("[%s] WiFi down for %lu s - opening setup portal\n",
+                          TAG, (unsigned long)((millis() - _downSinceMs) / 1000));
+            startSetupAp();
+        }
+    }
+
     // Link-loss watchdog. WiFi.setAutoReconnect() handles a plain drop, but
     // a wedged lwIP stack (see NOTES.md: the udp_new_ip_type panic) leaves
     // WiFi dead while the rest of the ESP runs. If we were connected and the
     // link has stayed down past the grace window, force the same clean
     // disconnect+begin() sequence setCredentials() uses.
-    if (_ssid.length()) {
+    if (_ssid.length() && !_setupAp) {  // paused while the portal is up
         if (st == WL_CONNECTED) {
             _wasConnected = true;
             _linkLostAtMs = 0;
@@ -146,6 +180,9 @@ bool NetTime::setCredentials(const String& ssid, const String& pass) {
         }
         return true;
     }
+    // The setup portal closes first (no-op if it was off): STA attempts
+    // would hop channels and break the AP for the phone that just saved.
+    stopSetupAp();
     // Abort any in-flight attempt cleanly before restarting: begin() right
     // after a disconnect()/failed attempt returned WL_CONNECT_FAILED (4)
     // once, while the same credentials connect fine at boot.
@@ -170,6 +207,50 @@ void NetTime::clearCredentials() {
     _pass = "";
     WiFi.disconnect(false, true);
     Serial.printf("[%s] WiFi credentials cleared\n", TAG);
+}
+
+void NetTime::startSetupAp() {
+    if (_setupAp) {
+        return;
+    }
+    _setupAp = true;
+    String mac = WiFi.macAddress();
+    mac.replace(":", "");
+    _setupSsid = String(SETUP_SSID_PREFIX) + mac.substring(mac.length() - 4);
+    // Pause STA while the portal is up: connect attempts (and auto-reconnect)
+    // scan every channel and the softAP drops off its channel with them -
+    // phones get kicked off the setup network mid-session. STA resumes when
+    // the AP closes (stopSetupAp / setCredentials).
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect(false, false);
+    WiFi.mode(WIFI_AP_STA);
+    // Pre-scan BEFORE the AP exists: a scan hops channels and would kick
+    // connected phones - but there are no clients yet. The list is then
+    // ready on the first /wifi load; later rescans are user-invoked.
+    Serial.println("[NetTime] pre-scan for the setup portal...");
+    WiFi.scanDelete();
+    WiFi.scanNetworks(false, false);  // blocking ~2-3 s, no clients yet
+    WiFi.softAP(_setupSsid.c_str());  // open network: the portal itself is the gate
+    Serial.printf("[%s] setup portal live: join open network '%s', then open "
+                  "http://%s/ (any URL redirects there)\n",
+                  TAG, _setupSsid.c_str(), WiFi.softAPIP().toString().c_str());
+}
+
+void NetTime::stopSetupAp() {
+    if (!_setupAp) {
+        return;
+    }
+    _setupAp = false;
+    WiFi.softAPdisconnect(true);
+    WiFi.setAutoReconnect(true);
+    // Back to STA-only; an established STA link survives the mode change.
+    WiFi.mode(WIFI_STA);
+    if (_ssid.length() && WiFi.status() != WL_CONNECTED) {
+        // STA was paused for the portal; bring the stored credentials back.
+        WiFi.begin(_ssid.c_str(), _pass.c_str());
+    }
+    _downSinceMs = 0;  // fresh grace window before the AP may re-open
+    Serial.printf("[%s] setup portal closed\n", TAG);
 }
 
 void NetTime::setTimezone(const String& tz) {
